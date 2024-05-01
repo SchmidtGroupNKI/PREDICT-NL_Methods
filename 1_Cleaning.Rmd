@@ -11,6 +11,7 @@ output:
 
 ```{r setup, include=FALSE}
 #Set libpath
+#ADDITION
 #.libPaths(c('U:/libraries', .libPaths()))
 
 knitr::opts_chunk$set(
