@@ -1,0 +1,520 @@
+---
+title: 'Preparing the MINDACT dataset'
+author: 'Mary Ann Binuya'
+date: '2024-02-27'
+output:
+  html_document:
+    toc: true
+    toc_float: true
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+#Set libpath
+#.libPaths(c('U:/libraries', .libPaths()))
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = TRUE,
+  warning = FALSE,
+  fig.retina = 3,
+  fig.path = 'Output/1 Data Prep/')
+
+#Load libraries
+library(survival) #for data splitting
+library(dplyr) #for data manipulations
+library(mice) #for imputations
+library(cmprsk) #for competing risk analysis
+library(riskRegression) #for fgr 
+library(cmprsk) #for fgr
+library(lava) #for fgr
+library(prodlim) #for fgr
+library(survminer) #for ggsurvplot
+library(coxme) #for mixed effect Cox model
+
+rm(list=ls())
+```
+
+# Aim(s)
+1. To import and prepare MINDACT dataset
+2. To create imputed MINDACT dataset(s)
+3. To run PREDICT on imputed MINDACT dataset(s)
+4. To check significance of genomic risk for predicting competing events (breast cancer and other deaths)
+5. To check proportionality of hazards
+6. To check linearity of continuous variables
+7. To check if it is necessary to adjust for country
+8. To check if genomic risk effect is modified by other risk factors
+
+# 1. Import and prepare dataset
+```{r Prep}
+# Load data
+  mindact <- readxl::read_excel('Data/10041_MIND001_002_transfer.xlsx')
+ 
+  data <- mindact %>%
+    select(patid_rand, #Patient IDs to check number of unique records
+           tables_AP2,#Group: corrected risk
+           Country, #Country, for sensitivity analysis
+           clinical_risk, #Adjuvant! Online risk (uncorrected)
+           clinical_risk_crg, #Adjuvant! Online risk (corrected)
+           genomic_risk, #Genomic risk (uncorrected)
+           genomic_risk_crg, #Genomic risk (corrected)
+           age, #Age at diagnosis
+           meno_MV, #Menopausal status
+           tsizecrg, #Tumor size in mm
+           tgradpr, tgradelcrg, #Histological grade central and local
+           lnstatuscrg, #Number of positive nodes
+           er_strict, erstatcrg, #ER status central and local
+           pgr_strict, pgrstatcrg, #PR status central and local
+           her_bin, her2_local, #Her2 central and local
+           ki67_3, #Ki67 status
+           chemo_trt2, #Chemotherapy
+           adj_ht, #Hormone therapy
+           adj_tras, #Anti-HER2 therapy
+           OS, OS_CR, OStime) %>% #Overall survival, Overall survival (competing risk), Follow-up time
+   rename(pid = patid_rand,
+          rgroup = tables_AP2,
+          country=Country,
+          crisk_ao=clinical_risk_crg,
+          grisk=genomic_risk_crg,
+          age.start=age,
+          menop=meno_MV,
+          size=tsizecrg,
+          grade_central=tgradpr,
+          grade_local=tgradelcrg,
+          nodes=lnstatuscrg,
+          er_central=er_strict,
+          er_local=erstatcrg,
+          pr_central=pgr_strict,
+          pr_local=pgrstatcrg,
+          her2_central=her_bin,
+          ki67=ki67_3,
+          chemo=chemo_trt2,
+          horm=adj_ht,
+          traz=adj_tras,
+          os=OS,
+          oscr=OS_CR,
+          time=OStime) %>%
+    mutate(eventbc = ifelse(oscr==1, 1, 0), #BC events
+           eventoth = ifelse(oscr==2, 1, 0)) #Other events
+
+# Explore data
+  n_distinct(data$pid) #6693 unique IDs/patients
+  
+  #country
+  table(data$country, useNA='always') #no missing
+  
+  #age
+  data$age.start <- round(data$age.start,0)
+  table(data$age.start, useNA='always') #no missing; 3 patients outside of PREDICT recommended range (25-85) but close enough so retain
+  
+  #menopausal status (relevant for bisphosphonates use)
+  table(data$menop, useNA='always') #251 missing
+  
+  #size in mm
+  table(data$size, useNA='always') #no missing but 1 patient with size=0, confirmed DCIS; exclude
+  
+    data$er_local[data$size=='0'] #patient with size=0 is ER+, which will cause the breast cancer specific linear predictor of PREDICT to be -Inf; exclude
+    
+  #grade - use central lab, otherwise (if missing) use local to be consistent with previous MINDACT analysis
+  data$grade <- ifelse(!is.na(data$grade_central), data$grade_central, data$grade_local)
+  table(data$grade, useNA='always') #11 missing, recode as NA
+  data$grade[data$grade==9] <- NA
+  
+  #nodes - note: category 4 is 4+ nodes
+  table(data$nodes, useNA='always') #1 missing
+  
+  #er status - use central lab, otherwise (if missing) use local
+  data$er <- ifelse(!is.na(data$er_central), data$er_central, data$er_local) #1% cut-off per protocol
+  table(data$er, useNA='always') #no missing
+  
+  #pr status - use central lab, otherwise (if missing) use local
+  data$pr <- ifelse(!is.na(data$pr_central), data$pr_central, data$pr_local) #1% cut-off per protocol
+  table(data$pr, data$er, useNA='always') #1 missing (ER+)
+  
+  #her2 status - use central lab, otherwise (if missing) use local
+  data$her2 <- ifelse(!is.na(data$her2_central), data$her2_central, data$her2_local)
+  table(data$her2, useNA='always') #2 missing
+  
+  #ki67 status - note: cut-offs are 14%, 20%% (PREDICT uses cut off of 10%)
+  data$ki67[data$ki67==2] <- 1 #combine levels above 14%
+  table(data$ki67, useNA='always') #841 missing
+  
+  #chemotherapy generation
+  data$generation <- ifelse(data$chemo==3|data$chemo==4, 3, data$chemo) #taxane-based regimens
+  data$generation[data$chemo==5] <- NA #recode other/unknown to NAs
+  table(data$generation, useNA='always') #220 missing chemo; exclude 9 patients treated with first generation chemo as PREDICT doesn't allow this; moreover, missing patients are unlikely to be treated with first gen (year of diagnosis: 2007-11; while around 2001 taxanes (3rd gen) were already available for treatment of advanced breast cancer)
+
+  #hormone therapy
+  table(data$horm, useNA='always') #117 missing
+  
+  #anti-HER2/trastuzumab therapy
+  table(data$traz, useNA='always') #112 missing
+  
+  #crisk
+  table(data$crisk_ao, useNA='always') #1 missing
+  data$crisk_ao[is.na(data$crisk_ao)] <- 0 #recode to low per MINDACT codebook
+  
+  #grisk
+  table(data$grisk, useNA='always') #1 missing
+  data$grisk[is.na(data$grisk)] <- 0 #recode to low per MINDACT codebook
+  
+    #noted: 176 (2.6%) discrepancies between corrected and uncorrected grisk --> use corrected risks
+    table(data$grisk, data$genomic_risk, useNA='always')
+  
+  #follow-up time
+  data$time <- round(data$time/365.25,2) #convert days to years
+  data$time <- ifelse(data$time == 0, 0.003, data$time) #2 patients with time=0 years actually died after 1 day, corrected
+    
+# Create the variables needed in PREDICT but not available in MINDACT
+  #method of screening
+  data$screen <- 2 #assume unknown for all
+  
+  #bisphophonates
+  data$bis <- NA
+  data$bis <- ifelse(data$menop==2, 1, ifelse(data$menop==1, 0, data$bis)) #assume post-menopausal women received bisphosphonates
+  data$bis[is.na(data$bis)&data$age.start>50] <- 1 #use 50 as age cut off for menopause
+  data$bis[is.na(data$bis)&data$age.start<=50] <- 0
+  table(data$bis, useNA='always')
+
+# Retain only eligible records per above
+  dataelig <- data %>%
+    filter(size > 0, #exclude 1 DCIS patient with size=0
+           generation != 1 | is.na(generation)) #exclude 9 patients treated with first generation chemo
+  
+# Retain only variables relevant for subsequent analysis
+  dataimp <- dataelig %>%
+    filter (er == 1) %>% #limit to ER+ patients
+    select(country, grisk, age.start, screen, size, grade, nodes, er, pr, her2, ki67,
+           generation, horm, traz, bis, os, oscr, time, eventbc, eventoth)
+```
+
+# 2. Create imputed dataset(s)
+```{r Imp}
+# Check missingness pattern
+  md.pattern(dataimp, rotate.names = TRUE) #assume MAR
+
+# Reformat variables
+  dataimp[, c('country', 'grisk', 'er', 'pr', 'her2', 'ki67', 'generation', 'horm', 'traz', 'bis')] <- lapply(dataimp[, c('country', 'grisk', 'er', 'pr', 'her2', 'ki67', 'generation', 'horm', 'traz', 'bis')], FUN=as.factor) #you can also use unclass() and assign class per variable but this is faster
+
+# Calculate marginal baseline cumhaz
+  dataimp$cumhaz_bc <- nelsonaalen(dataimp, time, eventbc)
+  dataimp$cumhaz_oth <- nelsonaalen(dataimp, time, eventoth)
+
+# Imputation
+  ini <- mice(dataimp, maxit=0)
+  ini$nmis #number of missing per variable
+  
+  vis <- c('nodes', 'pr', 'her2', 'grade', 'traz', 'horm', 'generation', 'ki67') #define order of imputation; alternatively, you can also just manually change the order of the columns
+  
+  method <- ini$method #check appropriate methods are used per variable
+  method
+  
+  pred_bc <- ini$predictorMatrix
+  pred_bc[,'screen'] <- 0 #exclude, constant
+  pred_bc[,'bis'] <- 0 #exclude, derived variable
+  pred_bc[,'os'] <- 0
+  pred_bc[,'oscr'] <- 0
+  pred_bc[,'eventoth'] <- 0
+  pred_bc[,'cumhaz_oth'] <- 0
+  pred_bc #keep as predictors: survival time, status indicator, baseline cumhaz, and relevant covariates
+
+  
+  pred_oth <- ini$predictorMatrix
+  pred_oth[,'screen'] <- 0 #exclude, constant
+  pred_oth[,'bis'] <- 0 #exclude, derived variable
+  pred_oth[,'os'] <- 0
+  pred_oth[,'oscr'] <- 0
+  pred_oth[,'eventbc'] <- 0
+  pred_oth[,'cumhaz_bc'] <- 0
+  pred_oth #keep as predictors survival time, status indicator, baseline cumhaz, and relevant covariates
+
+# Impute separately for each competing event
+  
+  #Breast cancer deaths
+  imp_bc <- mice(dataimp, m=20, visitSequence = vis, method=method, predictorMatrix=pred_bc, seed=202309) #FMI~0.2=20 imputations (see White, Royston, Wood, 2011)
+    
+  sapply(complete(imp_bc), function(x) sum(is.na(x))) #check no more missing
+  plot(imp_bc) #check convergence is ok
+  densityplot(imp_bc, ~grade+ki67+generation+horm+traz) #check distribution of original (blue) and imputed (red) data; note nodes, her2, and pr not in plot (only one missing each); also note levels are not correctly presented (this is not an error in imputed values, it's just the way MICE creates labels).
+  
+  imp_oth <- mice(dataimp, m=20, visitSequence = vis, method=method, predictorMatrix=pred_oth, seed=202309)
+  
+  #Other deaths
+  sapply(complete(imp_oth), function(x) sum(is.na(x)))
+  plot(imp_oth)
+  densityplot(imp_oth, ~grade+ki67+generation+horm+traz)
+
+  rm(ini, pred_bc, pred_oth, method, vis)
+```
+
+# 3. Run PREDICT on imputed dataset(s)
+```{r PREDICT}
+# Load PREDICT version 2.3 function
+source('Functions/predictv23_batchrunner.R')
+
+# Run PREDICT on imp_bc
+  datapredimp_bc <- complete(imp_bc, action='long', include=TRUE) #complete imputed data
+
+  datapredimp_bc[, c('er', 'pr', 'her2', 'ki67', 'generation', 'horm', 'traz', 'bis')] <- as.numeric(as.matrix(datapredimp_bc[, c('er', 'pr', 'her2', 'ki67', 'generation', 'horm', 'traz', 'bis')])) #format variables for PREDICT function
+  
+  datapredimp_bc <- ukpredict(datapredimp_bc, year=5, age.start=age.start, screen=screen, size=size, grade=grade, nodes=nodes, er=er, pr=pr, her2=her2, ki67=ki67, generation=generation, horm=horm, traz=traz, bis=bis)
+  
+  datapredimp_bc[, c('er', 'pr', 'her2', 'ki67', 'generation', 'horm', 'traz', 'bis')] <- lapply(datapredimp_bc[, c('er', 'pr', 'her2', 'ki67', 'generation', 'horm', 'traz', 'bis')], FUN=as.factor) #format variables back
+  
+  imppred_bc <- as.mids(datapredimp_bc)
+  
+# Run PREDICT on imp_oth
+  datapredimp_oth <- complete(imp_oth, action='long', include=TRUE) #complete imputed data
+  
+  datapredimp_oth[, c('er', 'pr', 'her2', 'ki67', 'generation', 'horm', 'traz', 'bis')] <- as.numeric(as.matrix(datapredimp_oth[, c('er', 'pr', 'her2', 'ki67', 'generation', 'horm', 'traz', 'bis')])) #format variables for PREDICT function
+  
+  datapredimp_oth <- ukpredict(datapredimp_oth, year=5, age.start=age.start, screen=screen, size=size, grade=grade, nodes=nodes, er=er, pr=pr, her2=her2, ki67=ki67, generation=generation, horm=horm, traz=traz, bis=bis)
+  
+  datapredimp_oth[, c('er', 'pr', 'her2', 'ki67', 'generation', 'horm', 'traz', 'bis')] <- lapply(datapredimp_oth[, c('er', 'pr', 'her2', 'ki67', 'generation', 'horm', 'traz', 'bis')], FUN=as.factor) #format variables back
+  
+  imppred_oth <- as.mids(datapredimp_oth)
+
+  rm(list=setdiff(ls(), c('datapredimp_bc', 'datapredimp_oth', 'imppred_bc', 'imppred_oth')))
+```
+
+# 4. Check significance of genomic risk for predicting competing events
+```{r Outcomes}
+# PREDICT considers two competing events in predicting overall mortality: breast cancer death and other/unknown deaths. We check if MammaPrint is a significant predictor for both events.
+
+  #Breast cancer
+    fit_bcss <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ grisk))
+    summary(pool(fit_bcss)) #grisk/MammaPrint a significant predictor for breast cancer death
+
+    fit_bcss_m <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ pirx + grisk))
+    summary(pool(fit_bcss_m)) #grisk/MammaPrint a significant predictor for breast cancer death
+    
+  #Other
+    fit_oth <- imppred_oth %>% with(coxph(Surv(time, eventoth) ~ grisk))
+    summary(pool(fit_oth)) #grisk/MammaPrint not a significant predictor for other/unknown death
+    
+    fit_oth_m <- imppred_oth %>% with(coxph(Surv(time, eventoth) ~ mi + grisk))
+    summary(pool(fit_oth_m)) #grisk/MammaPrint not a significant predictor for other/unknown death
+    
+    rm(list=ls(pattern="^fit"))
+  
+# Let's do a sanity check using subdistribution hazard models instead of cause-specific models
+  #Breast cancer
+    fgr_res <- fgr_res_m <- list()
+
+    for (i in 1:20) {
+      df <- datapredimp_bc %>% filter(.imp == i)
+      fgr_bcss <- FGR(Hist(time, oscr) ~ grisk, cause = 1, data = df)
+      fgr_res[[i]] <- summary(fgr_bcss)$coef
+      
+      fgr_bcss_m <- FGR(Hist(time, oscr) ~ pirx + grisk, cause = 1, data = df)
+      fgr_res_m[[i]] <- summary(fgr_bcss_m)$coef
+    }
+    
+    fgr_res #similar results as cause-specific model likely due to low event rates
+    fgr_res_m #similar results as cause-specific model likely due to low event rates
+    
+    rm(list=ls(pattern="^fgr"))
+    
+  #Other - subdistribution models
+    fgr_res <- fgr_res_m <- list()
+
+    for (i in 1:20) {
+      df <- datapredimp_bc %>% filter(.imp == i)
+      fgr_oths <- FGR(Hist(time, oscr) ~ grisk, cause = 2, data = df)
+      fgr_res[[i]] <- summary(fgr_oths)$coef
+      
+      fgr_oths_m <- FGR(Hist(time, oscr) ~ mi + grisk, cause = 2, data = df)
+      fgr_res_m[[i]] <- summary(fgr_oths_m)$coef
+    }
+    
+    fgr_res #similar results as cause-specific model
+    fgr_res_m #similar results as cause-specific model
+    
+    rm(list=ls(pattern="^fgr"))
+    rm(df)
+    
+# Limit analysis to prediction of breast cancer deaths.
+```
+
+# 5. Check proportionality of hazards
+```{r PH}
+zph <- zph_full <- list()
+
+for (i in 1:20) {
+  dat <- datapredimp_bc %>%
+    filter(.imp == i) %>%
+    select(time, eventbc,
+           grisk, pirx, age.start, size, grade, nodes, pr, her2, ki67, generation, horm, traz, bis)
+  
+  fit_bc <- coxph(Surv(time, eventbc) ~ grisk, data = dat)
+  res <- cox.zph(fit_bc, transform = 'identity')
+  zph[[i]] <- res
+  
+  fit_bc_full <- coxph(Surv(time, eventbc) ~ ., data = dat) #include all covariates
+  res_full <- cox.zph(fit_bc_full, transform = 'identity')
+  zph_full[[i]] <- res_full
+}
+
+rand <- sample(1:20, 1) #show result only of the ith random imputed data (results almost identical across imputed datasets)
+
+zph[[rand]] #grisk hazard is reasonably proportional over time
+zph_full[[rand]] #pirx, grade, her2, and ki67 do not have proportional hazards according to individual test
+plot(res_full) #trend over time (not transformed); non-proportionality for above covariates not extreme
+  
+  rm(list=ls(pattern="^fit"))
+  rm(list=ls(pattern="^zph"))
+  rm(list=ls(pattern="^res"))
+  rm(i, rand)
+  rm(dat)
+
+#The Schoenfeld residuals test indicates that the proportional hazards assumption is generally upheld for MammaPrint/genomic risk and most covariates for prediction of breast cancer (BC) deaths. Although the BC-specific linear predictor, pirx, shows non-proportional behavior, the graphical analysis of residuals suggests the non-proportionality is not that severe, also for the following covariates: Grade effect goes up slightly over time (in the first 5 years the change is minor). HER2 effect goes up in the first 5 years and slowly goes down, and KI67 effect attenuates after 10 years but seems more or less constant in the first 5 years.
+```
+
+# 6. Check linearity of continuous variables
+```{r Lin}
+# To assess linearity, we fit both a linear and non-linear term and check their significance.
+
+fit_pirx <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ pspline(pirx))) #if df=0 is specified, pspline will choose the best df based on AIC
+fit_pirx_res <- summary(fit_pirx)
+mean(fit_pirx_res$p.value[fit_pirx_res$term == 'pspline(pirx), nonlin']) #mean p-val for non-linear term > 0.05; linear enough
+  
+fit_age <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ pirx + pspline(age.start)))
+fit_age_res <- summary(fit_age)
+mean(fit_age_res$p.value[fit_age_res$term == 'pspline(age.start), nonli']) #linear
+  
+fit_size <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ pirx + pspline(size)))
+fit_size_res <- summary(fit_size)
+mean(fit_size_res$p.value[fit_size_res$term == 'pspline(size), nonlin'])  #size is non-linear, addition of this term --> more tailored model to MINDACT
+
+fit_nodes <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ pirx + pspline(nodes)))
+fit_nodes_res <- summary(fit_nodes)
+mean(fit_nodes_res$p.value[fit_nodes_res$term == 'pspline(nodes), nonlin']) #linear
+mean(fit_nodes_res$p.value[seq(3, nrow(fit_nodes_res), by = 3)])  #linear
+
+  rm(list = ls(pattern = '^fit'))
+```
+
+# 7. Check if necessary to adjust for country
+```{r Country}
+#Check as fixed effect
+  fit_country1 <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ pirx + grisk))
+  cbind(summary(pool(fit_country1))[,1], round(summary(pool(fit_country1))[,-1], 2))
+  
+  fit_country2 <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ pirx + grisk + country))
+  cbind(summary(pool(fit_country2))[,1], round(summary(pool(fit_country2))[,-1], 2)) #effect of grisk not confounded by country
+  
+  fit_country3 <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ pirx + grisk*country))
+  cbind(summary(pool(fit_country3))[,1], round(summary(pool(fit_country3))[,-1], 2)) #interactions not significant (note: Slovenia and Switzerland have few observations), controlling for clinical risk
+  
+  fit_country4 <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ grisk*country))
+  cbind(summary(pool(fit_country4))[,1], round(summary(pool(fit_country4))[,-1], 2)) #interactions not significant (note: Slovenia and Switzerland have few observations), not controlling for clinical risk
+
+#Check as random effect
+  fit_country5 <- imppred_bc %>% with(coxme(Surv(time, eventbc) ~ pirx + grisk + (1|country)))
+  fit_country5
+  
+  #The fixed effects are interpreted as usual; the random effects indicate how much variation is present between the levels of the random effect variable (e.g., between countries). Here we can see that the variance component associated with the random effect is quite small (there is not much variation between countries).
+  
+  #The addition of country as fixed or random effect did not impact the predictor effects for pirx and grisk (i.e., their effects are independent of country).
+
+#Check baseline differences across countries
+  for (i in 1:20) {
+    dat <- datapredimp_bc %>%
+      filter(.imp == i) %>%
+      select(time, eventbc, pirx, country)
+    
+    dat$country2 <- ifelse(dat$country == "Slovenia" | dat$country == "Switzerland" | dat$country == "United Kingdom", "Others", as.character(dat$country))
+    dat$country2 <- as.factor(dat$country2)
+    
+    #Baseline survival across countries with linear predictor offset
+    fit_country5 <- coxph(Surv(time, eventbc) ~ offset(pirx) + strata(country2), data = dat)
+    surv_estimates <- survfit(fit_country5)
+    plot(surv_estimates, col = 1:length(unique(dat$country2)),
+         xlab = "Time", ylab = "Survival Probability",
+         lty = 1:length(unique(dat$country2)),
+         ylim=c(0.9, 1.0))
+    legend("bottomleft", legend = levels(dat$country2),
+         col = 1:length(unique(dat$country2)),
+         lty = 1:length(unique(dat$country2)))
+    
+    #Baseline cumulative hazard across countries (based on Kaplan-Meier estimates)
+    fit_country6 <- survfit(Surv(time, eventbc) ~ country2, data = dat)
+    
+    plots<- ggsurvplot(fit_country6, pval = TRUE, data=dat, conf.int = FALSE,
+                   title = "Cumulative hazard",
+                   xlab = "Years", fun="cumhaz",
+                   ylim=c(0,0.15), risk.table = FALSE)
+    
+    print(plots)
+  }
+  
+  #Baseline cumulative survival (hazard) across countries is largely similar
+    
+  rm(list = ls(pattern = '^fit'))
+  rm(surv_estimates)
+  rm(plots)
+  rm(dat, i)
+```
+
+# 8. Check effect modification
+```{r Independence}
+#Check interactions with clinical risk factors
+fit_pirx<- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ grisk*pirx))
+cbind(summary(pool(fit_pirx))[,1], round(summary(pool(fit_pirx))[,-1], 2))
+
+fit_age<- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ grisk*age.start))
+cbind(summary(pool(fit_age))[,1], round(summary(pool(fit_age))[,-1], 2))
+
+fit_size<- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ grisk*size))
+cbind(summary(pool(fit_size))[,1], round(summary(pool(fit_size))[,-1], 2))
+
+fit_nodes<- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ grisk*nodes))
+cbind(summary(pool(fit_nodes))[,1], round(summary(pool(fit_nodes))[,-1], 2))
+
+fit_grade<- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ grisk*grade))
+cbind(summary(pool(fit_grade))[,1], round(summary(pool(fit_grade))[,-1], 2))
+
+fit_her2<- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ grisk*her2))
+cbind(summary(pool(fit_her2))[,1], round(summary(pool(fit_her2))[,-1], 2))
+##significant interaction, effect modified (increased)
+
+fit_her22<- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ offset(pirx) +  grisk*her2))
+cbind(summary(pool(fit_her22))[,1], round(summary(pool(fit_her22))[,-1], 2))
+
+fit_her23<- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ pirx +  grisk*her2))
+cbind(summary(pool(fit_her23))[,1], round(summary(pool(fit_her23))[,-1], 2))
+
+fit_her24<- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ offset(pirx) +  grisk + grisk:her2))
+cbind(summary(pool(fit_her24))[,1], round(summary(pool(fit_her24))[,-1], 2))
+
+fit_ki67<- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ grisk*ki67))
+cbind(summary(pool(fit_ki67))[,1], round(summary(pool(fit_ki67))[,-1], 2))
+
+fit_pr <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ grisk*pr))
+cbind(summary(pool(fit_pr))[,1], round(summary(pool(fit_pr))[,-1], 2))
+
+#Additional checks
+fit_horm <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ grisk*horm))
+cbind(summary(pool(fit_horm))[,1], round(summary(pool(fit_horm))[,-1], 2))
+##significant interaction
+
+fit_chemo <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ grisk*generation))
+cbind(summary(pool(fit_chemo))[,1], round(summary(pool(fit_chemo))[,-1], 2))
+
+fit_traz <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ grisk*traz))
+cbind(summary(pool(fit_traz))[,1], round(summary(pool(fit_traz))[,-1], 2))
+
+fit_bis <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ grisk*bis))
+cbind(summary(pool(fit_bis))[,1], round(summary(pool(fit_bis))[,-1], 2))
+
+#The prognostic effect of genomic risk for breast cancer-specific mortality is largely independent of standard clinical risk factors except for HER2 status (likely sampling related). We retained the simple extended models without interactions for parsimony.
+
+#Note that we did not check genomic risk interaction with ER status as we restricted the analyses to only ER+ tumors. If we used the overall dataset, it still would not have been possible to obtain the interaction effect of genomic risk with ER status as there were zero events in the genomic low risk subgroup of ER- tumors.
+
+  rm(list = ls(pattern = '^fit'))
+```
+
+```{r Save}
+#save.image('WS_1_Data_Prep_MINDACT.RData')
+```
+
