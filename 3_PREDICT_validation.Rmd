@@ -1,0 +1,450 @@
+---
+title: "External validation of PREDICT v2.3 on the MINDACT dataset"
+author: "Mary Ann Binuya"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+  pdf_document: default
+---
+
+# Aims
+1. To externally validate PREDICT v2.3 (with progesterone extension) on the MINDACT dataset
+2. To check misspecification of baseline cumulative hazard and predictor effects/prognostic index (PI) for the MINDACT trial cohort
+
+```{r setup, include=FALSE}
+#Set libpath
+#.libPaths(c("U:/libraries", .libPaths()))
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = TRUE,
+  warning = FALSE,
+  fig.retina = 4,
+  fig.path = "Output/3 External Validation/")
+
+#Load libraries
+library(dplyr) #for data manipulations
+library(rms) #for survival analysis
+library(survival) #for survival analysis
+library(writexl) #for exporting datasets
+library(mice) #for pooling estimates
+
+rm(list=ls())
+```
+
+# Load data
+```{r Load}
+load("WS_1_Data_Prep_MINDACT.RData")
+
+dat <- datapredimp_bc %>%
+  filter(.imp!=0) %>%
+  select(.imp,
+         time, #Follow-up time
+         oscr, #Competing events
+         pi, #Linear predictor without treatment
+         pirx, #Linear predictor BC death
+         age.start, #Age at diagnosis
+         size, #Tumor size
+         grade, #Tumor grade
+         nodes, #Number of nodes
+         er, #ER status
+         pr, #Progesterone status
+         her2, #HER2 status
+         ki67, #Ki67 status
+         generation, #Chemotherapy generation
+         horm, #Hormone therapy
+         traz, #Trastuzumab (anti-HER2 therapy)
+         bis, #Bisphosphonates
+         grisk, #Genomic risk (MammaPrint)
+         eventbc) #Breast cancer death
+
+  rm(list=setdiff(ls(), c("dat", "imppred_bc")))
+  
+  table(dat$er, useNA="always") #only ER+ patients (sanity check)
+  
+  nimp <- max(dat$.imp) #m=20 imputations
+  
+# Derive predicted breast cancer specific survival at 5 years
+  tmax <- 5
+  
+  bhaz_bc <- exp(0.7424402 - 7.527762/sqrt(tmax) - 1.812513*log(tmax)/sqrt(tmax)) #ER+ BC baseline cumhaz
+  bsurv_bc <- exp(-bhaz_bc) #S0 = exp(-cumhaz)
+  dat$bcss <- bsurv_bc^exp(dat$pirx)
+  
+# Load functions
+  source("Functions/pool_perf.R")
+  
+  rm(pool_brier, pool_auc, calplot_auc) #remove non-necessary ones
+```
+
+
+# 1. Check PREDICT model performance at 5 years
+```{r Perfstats}
+# Calculate performance metrics for each imputed dataset
+  perf <- function (dataframe) { 
+    perf_stats <- matrix(NA, nimp, 6)
+    risk_list <- vector("list", nimp)
+  
+    for (i in 1:nimp) {
+    
+        data <- dat[dat[".imp"] == i, ]
+        data$subject <- seq_len(nrow(data))
+        
+        f <- coxph(Surv(time, eventbc) ~ pirx, x = TRUE, y = TRUE, data = data)
+        
+        # Discrimination
+        c_temp <- concordance(f, ymax = tmax)
+        c_stats <- c_temp$concordance
+        se_c_stats <- sqrt(c_temp$var)
+        
+        #auc_temp <- timeROC( #time-dependent AUC produces similar result as Harrell's and Uno's C for MINDACT but much slower computation time. For methods paper, report Harrell's C.
+        #  T = data$time,
+        #  delta = data$oscr,
+        #  cause = 1,
+        #  marker = 1 - data$bcss, #assumes larger values = higher risk of events, without loss of generality
+        #  weighting = "marginal",
+        #  times = tmax,
+        #  iid = TRUE)
+        #auc_stats <- as.numeric(auc_temp$AUC_2[2])
+        #se_auc_stats <- as.numeric(auc_temp$inference$vect_sd_2[2])
+        
+        # Calibration slope
+        cs_stats <- f$coefficients
+        se_cs_stats <- sqrt(diag(vcov(f)))
+        
+        # Calibration-in-the-large
+          # Observed proportion at tmax
+          surv_fit <- survfit(Surv(data$time, data$eventbc) ~ 1)
+          obs_risk <- 1 - summary(surv_fit, times = tmax)$surv
+          obs_se <- summary(surv_fit, times = tmax)$std.err
+          obs_lrisk <- 1 - summary(surv_fit, times = tmax)$upper
+          obs_urisk <- 1 - summary(surv_fit, times = tmax)$lower
+          
+          # Predicted risk at tmax
+          data$predrisk <- 1 - data$bcss
+          exp_risk <- mean(data$predrisk)
+          
+          # O/E ratio
+          OE_stats <- obs_risk / exp_risk
+          se_OE_stats <- obs_se/obs_risk #if log transformation is required (see Debray 2017 formula)
+          #se_OE_stats <- obs_se / exp_risk #if log transformation not required
+        
+        risk_list[[i]] <- data.frame(subject = data$subject,
+                                     predrisk = data$predrisk)
+        
+        perf_stats[i, ] <- c(c_stats, se_c_stats,
+                             #auc_stats, se_auc_stats,
+                             cs_stats, se_cs_stats,
+                             OE_stats, se_OE_stats)
+        
+        colnames(perf_stats) <- c("c_stats", "se_c_stats",
+                                  #"auc_stats", "se_auc_stats",
+                                  "cs_stats", "se_cs_stats",
+                                  "OE_stats", "se_OE_stats")
+        
+  }
+
+# Pool results
+  res_C <- pool_estimates(perf_stats[, "c_stats"], perf_stats[, "se_c_stats"], logit_trans = TRUE) #apply logit transformation
+  
+  #res_AUC <- pool_estimates(perf_stats[, "auc_stats"], perf_stats[, "se_auc_stats"], logit_trans = TRUE) #apply logit transformation
+  
+  res_calslope <- pool_estimates(perf_stats[, "cs_stats"], perf_stats[, "se_cs_stats"])
+  
+  res_OEratio <- pool_estimates(perf_stats[, "OE_stats"], perf_stats[, "se_OE_stats"], log_trans = TRUE) #apply log transformation
+  
+  risk_res  <- do.call(rbind, risk_list) %>%
+      group_by(subject) %>%
+      dplyr::summarize(
+        predicted_risk = mean(predrisk))
+    
+  risk_df <- cbind(risk_res, time = data$time, event = data$eventbc)
+  
+  res <- list(pooled_C = res_C,
+              #pooled_AUC = res_AUC,
+              pooled_CalSlope = res_calslope,
+              pooled_OEratio = res_OEratio,
+              pooled_risks = risk_df)
+  
+  return(res)
+}
+
+mindact_res <- perf(dat)
+mindact_res[1:3]
+
+risk_df <- mindact_res$pooled_risks
+head(risk_df)
+```
+
+## 1.1 Validation plot
+```{r Valplot, fig.height=5, fig.width=4.75}
+# Plot with cloglog transformation of predicted survival (i.e., plots log cumhaz)
+  calplot_fn(data = risk_df,
+          tmax = tmax,
+          main = "MINDACT dataset (n=5920)",
+          C = mindact_res$pooled_C,
+          calslope = mindact_res$pooled_CalSlope,
+          OEratio = mindact_res$pooled_OEratio,
+          limit = 0.15,
+          size_lab = 0.8,
+          size_legend = 0.8,
+          size_bintext = 0.6,
+          line_bins = -0.02,
+          triangles = TRUE,
+          g = 5)
+
+# Alternative plot (sanity check): without cloglog transformation
+  df <- risk_df
+  
+  # Predicted mortality
+  df$predmort <- df$predicted_risk
+  
+  # Create groups
+  q5 <- cut(df$predmort,
+             breaks = quantile(df$predmort, probs = seq(0, 1, 0.2)),
+             include.lowest = TRUE)
+  df$q5_f <- factor(q5, levels = levels(q5),
+                     labels = c("q1", "q2", "q3", "q4", "q5"))
+  
+  # Observed mortality
+  obs <- survfit(Surv(time, event) ~ q5_f, data = df)
+  obs_sum <- summary(obs, times = tmax, extend = TRUE)
+  
+  # Plot
+  calplot <- data.frame(y = (1 - obs_sum$surv),
+                        y.lower = (1 - obs_sum$upper),
+                        y.upper = (1 - obs_sum$lower),
+                        x = as.numeric(tapply(df$predmort, df$q5_f, mean)))
+  
+  par(las = 1, xaxs = "i", yaxs = "i")
+  plot(calplot$x, calplot$y, type = "b", bty = "n", pch = 15, col = "black", lty = 1,
+       xlim = c(-0.01, 0.1), ylim = c(-0.01, 0.1),
+       xlab = "Predicted probability",
+       ylab = "Observed proportion",
+       cex.lab = 0.75, cex.axis = 0.75)
+  
+  # Add confidence intervals
+  plotrix::plotCI(x = calplot$x, y = calplot$y,
+                   li = calplot$y.lower, ui = calplot$y.upper,
+                   xlim = c(-0.01, 0.15), ylim = c(-0.01, 0.15), add = TRUE, col = "black", pch = 16)
+  
+  # Add a diagonal reference line
+  abline(a = 0, b = 1, lwd = 1, lty = 2, col = "gray")
+  
+  # Add texts
+  text(x=-0.01, y=0.10-0.01, labels=paste("Discrimination"), cex=0.75, pos=4)
+  text(x=-0.01, y=0.10-0.015, labels=paste("...C: ", mindact_res$pooled_C, sep=""), cex=0.75, pos=4)
+  text(x=-0.01, y=0.10-0.02, labels=paste("Calibration "), cex=0.75, pos=4)
+  text(x=-0.01, y=0.10-0.025, labels=paste("...Slope: ", mindact_res$pooled_CalSlope, sep=""), cex=0.75, pos=4)
+  text(x=-0.01, y=0.10-0.03, labels=paste("...O/E ratio: ", mindact_res$pooled_OEratio, sep=""), cex=0.75, pos=4)
+
+  # Add title
+  title("MINDACT dataset (n=5920)", adj = 0.5)
+  
+  box()
+  
+  rm(df, obs, obs_sum, q5)
+```
+
+## 1.2 Net benefit and plot decision curve analysis
+```{r DCplot, fig.height=5, fig.width=7}
+# Calculate Net Benefit
+  form0_nb_TP <- nb_fn_TP(data = risk_df, tmax = tmax, thresholdmax = 0.2)
+  form0_nb_TN <- nb_fn_TN(data = risk_df, tmax = tmax, thresholdmax = 0.2)
+  form0_TP <- cbind(threshold = form0_nb_TP$threshold, round(form0_nb_TP[,-1]*1000,0)) #NB per 1000
+  form0_TN <- cbind(threshold = form0_nb_TN$threshold, round(form0_nb_TN[,-1]*1000,0)) #NB per 1000
+  #write_xlsx(form0_TP, "Data/form0_TP_per1000.xlsx") #export
+  #write_xlsx(form0_TN, "Data/form0_TN_per1000.xlsx") #export
+  head(form0_TP)
+  head(form0_TN)
+
+# Sanity check that code produces results in line with R function from Vicker's et al.
+  par(las = 1, xaxs = "i", yaxs = "i")
+  plot(form0_nb_TP$threshold,
+       form0_nb_TP$NB_all,
+       type = "l", lwd = 3, lty = 1, col = "darkgray",
+       xlab = "Threshold probability", ylab = "Net benefit",
+       xlim = c(0, 0.20), ylim = c(-0.010, 0.002), bty = "n",
+       cex.lab = 1, cex.axis = 1)
+  smooth0 <- smooth.spline(form0_nb_TP$threshold, form0_nb_TP$NB, spar=0.35)
+  lines(smooth0, type = "l", lwd = 3, col="black")
+  abline(h=0, col="black", lwd=1)
+  #abline(v=0.12, col="black", lty=2)
+  legend("bottomright", legend = c("Treat all", "Original model"),
+         lty = c(1,1), lwd = 3, cex = 1, col = c("darkgray", "black"), bty = "n")
+  title("MINDACT dataset (n=5920)", adj = 0.5, cex = 1.5)
+  #rect(xleft = 0.05, xright = 0.15, ybottom = par("usr")[3], ytop = par("usr")[4],
+  #     border = NA, col = adjustcolor("grey", alpha = 0.3))
+  
+  #Using function:
+  source("Functions/stdca.R") #for time-to-event data
+  temp <- stdca(data = risk_df, outcome = "event", ttoutcome = "time",
+    timepoint = 5, predictors = "predicted_risk", xstop = 0.2, ymin = -0.01) #same plot
+  
+  form0_nb_TP$NB_all[form0_nb_TP$threshold==0.05]
+  temp$net.benefit$all[temp$net.benefit$threshold==0.05] #same net benefit for treat all at 5% threshold
+  
+  form0_nb_TP$NB[form0_nb_TP$threshold==0.05]
+  temp$net.benefit$predicted_risk[temp$net.benefit$threshold==0.05] #same net benefit for model at 5% threshold
+  
+  rm(temp)
+  
+  #Show crossing of line at event rate for treat all
+    #Event rate at 5 years (very low):
+    eventrate = 1 - summary(survfit(Surv(time, event) ~ 1, data = risk_df), times = tmax)$surv
+    
+   #Plot:
+    par(las = 1, xaxs = "i", yaxs = "i")
+    plot(form0_nb_TP$threshold,
+         form0_nb_TP$NB_all,
+         type = "l", lwd = 3, lty = 1, col = "darkgray",
+         xlab = "Threshold probability", ylab = "Net benefit",
+         xlim = c(0, 0.05), ylim = c(-0.004, 0.002), bty = "n",
+         cex.lab = 1, cex.axis = 1)
+    smooth0 <- smooth.spline(form0_nb_TP$threshold, form0_nb_TP$NB, spar=0.35)
+    lines(smooth0, type = "l", lwd = 3, col="black")
+    abline(h=0, col="black", lwd=1)
+    abline(v=eventrate, col="black", lty=2)
+    legend("bottomright", legend = c("Treat all", "Original model"),
+           lty = c(1,1), lwd = 3, cex = 1, col = c("darkgray", "black"), bty = "n")
+    title("MINDACT event rate at 5 years = 0.011", adj = 0.5, cex = 1.5)
+    #rect(xleft = 0.05, xright = 0.15, ybottom = par("usr")[3], ytop = par("usr")[4],
+    #     border = NA, col = adjustcolor("grey", alpha = 0.3))
+    
+# Plot decision curve analysis plot (TP) with smoothing
+  par(las = 1, xaxs = "i", yaxs = "i")
+  plot(form0_nb_TP$threshold,
+       form0_nb_TP$NB_all*1000,
+       type = "l", lwd = 3, lty = 1, col = "darkgray",
+       xlab = "Threshold probability", ylab = "Net benefit (per 1000)",
+       xlim = c(0, 0.25), ylim = c(-1, 5), bty = "n",
+       cex.lab = 1, cex.axis = 1)
+  smooth0 <- smooth.spline(form0_nb_TP$threshold, form0_nb_TP$NB*1000, spar=0.35)
+  lines(smooth0, type = "l", lwd = 3, col="black")
+  abline(h=0, col="black", lwd=1)
+  #abline(v=0.12, col="black", lty=2)
+  legend("topright", legend = c("Treat all", "Original model"),
+         lty = c(1,1), lwd = 3, cex = 1, col = c("darkgray", "black"), bty = "n")
+  title("MINDACT dataset (n=5920)", adj = 0.5, cex = 1.5)
+  #rect(xleft = 0.05, xright = 0.15, ybottom = par("usr")[3], ytop = par("usr")[4],
+  #     border = NA, col = adjustcolor("grey", alpha = 0.3))
+  
+# Plot decision curve analysis plot (TN) with smoothing
+  par(las = 1, xaxs = "i", yaxs = "i")
+  plot(form0_nb_TN$threshold,
+       form0_nb_TN$NB_none*1000,
+       type = "l", lwd = 3, lty = 1, col = "darkgray",
+       xlab = "Threshold probability", ylab = "Net benefit (per 1000)",
+       xlim = c(0, 0.25), ylim = c(-1, 1000), bty = "n",
+       cex.lab = 1, cex.axis = 1)
+  smooth0 <- smooth.spline(form0_nb_TN$threshold, form0_nb_TN$NB*1000, spar=0.35)
+  lines(smooth0, type = "l", lwd = 3, col="black")
+  abline(h=0, col="black", lwd=1)
+  #abline(v=0.12, col="black", lty=2)
+  legend("bottomright", legend = c("Treat none", "Original model"),
+         lty = c(1,1), lwd = 3, cex = 1, col = c("darkgray", "black"), bty = "n")
+  title("MINDACT dataset (n=5920)", adj = 0.5, cex = 1.5)
+  #rect(xleft = 0.05, xright = 0.15, ybottom = par("usr")[3], ytop = par("usr")[4],
+  #     border = NA, col = adjustcolor("grey", alpha = 0.3))
+  
+  rm(smooth0)
+```
+
+# 2. Check misspecification of PREDICT model for MINDACT dataset
+## 2.1 Baseline cumulative hazard
+```{r Baseline, fig.height=5, fig.width=5}
+years <- 1:10
+
+# Calculate PREDICT baseline survival
+  bhaz_PREDICT <- exp(0.7424402 - 7.527762/sqrt(years) - 1.812513*log(years)/sqrt(years))
+  bsurv_PREDICT <- exp(-bhaz_PREDICT)
+  
+# Calculate MINDACT baseline survival
+  bsurv_MINDACT <- numeric(length(years))
+
+  for (t in 1:length(years)) {
+    bhaz_t <- numeric(nimp)
+    for (i in 1:nimp) {
+      dat_i <- dat[dat$.imp == i, ]
+      fit <- coxph(Surv(time, eventbc) ~ offset(pirx), data = dat_i)
+      bhaz <- basehaz(fit)
+      bhaz_t[i] <- max(bhaz$hazard[bhaz$time <= years[t]]) #baseline cumhaz at time t
+    }
+    bsurv_MINDACT[t] <- exp(-mean(bhaz_t)) #mean baseline survival at time t
+  }
+
+# Calculate 95% CI of MINDACT baseline survival using first imputed data for computational efficiency
+  dat_1 <- dat %>% filter(.imp==1)
+  bsurv_MINDACT_lower <- numeric(length(years))
+  bsurv_MINDACT_upper <- numeric(length(years))
+  n_bootstrap <- 1000
+  
+  for (t in 1:length(years)) {
+      bhaz_boot <- numeric(n_bootstrap)
+      
+      # Perform bootstrapping
+      for (b in 1:n_bootstrap) {
+          
+          boot_data <- dat_1[sample(nrow(dat_1), replace = TRUE), ] #sample with replacement
+          fit <- coxph(Surv(time, eventbc) ~ offset(pirx), data = boot_data)
+          bhaz <- basehaz(fit)
+          bhaz_boot[b] <- max(bhaz$hazard[bhaz$time <= years[t]])
+      }
+      
+      # Calculate 95% confidence interval
+      bsurv_MINDACT_lower[t] <- exp(-quantile(bhaz_boot, probs = 0.025))
+      bsurv_MINDACT_upper[t] <- exp(-quantile(bhaz_boot, probs = 0.975))
+  }
+  
+# Plot the baseline survival estimates
+  plot(years, bsurv_PREDICT, type = "l", lwd = 2,
+       xlab = "Years after diagnosis", ylab = "Baseline survival probability",
+       ylim = c(0.9, 1), xlim = c(min(years), max(years)), 
+       axes = FALSE)
+  axis(1, at = seq(min(years), max(years), by = 1))
+  axis(2, las = 2)
+  polygon(c(years, rev(years)), c(bsurv_MINDACT_lower, rev(bsurv_MINDACT_upper)),
+          col = "grey", border = NA)
+  lines(years, bsurv_MINDACT, col = "black", lty = 2, lwd = 2)
+  legend(1, 0.92, legend = c("Predicted (PREDICT)", "Observed (MINDACT)"),
+         col = c("black", "black"), lty = c(1, 2), lwd = c(2, 2), 
+         bty = "n", cex = 0.8)
+  box()
+
+  rm(bhaz_PREDICT, i, bhaz_t, dat_i, fit, bhaz)
+  rm(dat_1, bsurv_MINDACT_lower, bsurv_MINDACT_upper, n_bootstrap, boot_data, bhaz_boot)
+
+#PREDICT underestimates baseline survival for MINDACT.
+
+round((bsurv_MINDACT[5]-bsurv_PREDICT[5])*100, 1) #5 year discrepancy
+round((bsurv_MINDACT[10]-bsurv_PREDICT[10])*100, 1) #10 year discrepancy
+``` 
+
+## 2.2 Predictor effects/prognostic index
+```{r Predeffects}
+fit_grisk <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ grisk))
+summary(pool(fit_grisk))
+exp(1.211757) #univariable hazard ratio of MammaPrint
+
+fit_all <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ offset(pirx) +
+                                       age.start + size + grade + nodes +
+                                       pr + her2 + ki67 +
+                                       generation + horm + traz + bis))
+summary(pool(fit_all)) #note some differences in predictor effects both in the positive and negative direction
+
+fit_pi <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ offset(pi) + pi))
+summary(pool(fit_pi)) #without treatment effects, joint distribution of predictor effects different but not significantly
+
+fit_pirx <- imppred_bc %>% with(coxph(Surv(time, eventbc) ~ offset(pirx) + pirx))
+summary(pool(fit_pirx)) #with consideration of treatment effects, the joint distribution of predictor effects not significantly different
+
+  rm(fit_all, fit_all_summary, res_fit_all,
+     fit_pi, fit_pi_summary, res_fit_pi)
+  
+#No significant lack of fit observed.
+  
+#save.image("WS_3_PREDICT_validation.RData")
+```
+

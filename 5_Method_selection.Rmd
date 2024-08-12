@@ -1,0 +1,122 @@
+---
+title: "Selection of updating method for MINDACT"
+author: "Mary Ann Binuya"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+  pdf_document: default
+---
+
+# Aim
+1. To select an appropriate updating method in MINDACT prior to extension with a new marker.\
+&emsp;a. Model with recalibration-in-the-large (only baseline is re-estimated)\
+&emsp;b. Recalibrated model (both baseline and slope are re-estimated)\
+&emsp;c. Revised model (full revised + PI)
+
+```{r setup, include=FALSE}
+#Set libpath
+#.libPaths(c("U:/libraries", .libPaths()))
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = TRUE,
+  warning = FALSE,
+  fig.retina = 3,
+  fig.path = "Output/5 Closed Test Results/")
+
+#Load libraries
+library(dplyr) #for data manipulations
+library(survival) #for survival analysis
+library(rms) #for survival analysis
+library(glmnet) #supports survival models
+library(caret) #doesn"t support survival models
+library(ggplot2) #ggplot
+```
+
+```{r Load, include=FALSE}
+load("WS_1_Data_Prep_MINDACT.RData")
+
+dat <- datapredimp_bc %>%
+  filter(.imp!=0) %>%
+  select(.imp,
+         time, #Follow-up time
+         eventbc, #Breast cancer death
+         pirx, #Linear predictor of PREDICT BC death ("clinical risk")
+         age.start, #Age at diagnosis
+         size, #Tumor size
+         grade, #Tumor grade
+         nodes, #Number of nodes
+         er, #ER status
+         pr, #Progesterone status
+         her2, #HER2 status
+         ki67, #Ki67 status
+         generation, #Chemotherapy generation
+         horm, #Hormone therapy
+         traz, #Trastuzumab (anti-HER2 therapy)
+         bis, #Bisphosphonates
+         grisk) #Genomic risk (MammaPrint)
+
+  rm(list=setdiff(ls(), c("dat")))
+  
+nimp <- max(dat$.imp)
+```
+
+# Selection procedure
+```{r Select}
+ClosedTestCox <- function(data, nimp, alpha_test = 0.05) {
+  X <- data[, c("pirx", "age.start", "size", "grade", "nodes", "pr", "her2", "ki67", "generation", "horm", "traz", "bis")]
+  X <- model.matrix( ~ ., X)[, -1]
+  df <- data.frame(time = data$time, event = data$eventbc, X)
+  df$wt <- 1/nimp
+  
+  # Method 1: Recalibration-in-the-large
+  model_recal_large <- coxph(Surv(time, event) ~ offset(pirx), weights = wt, data = df) #apply weighted estimation of log partial likelihood (i.e., subject i's contribution to the log partial likelihood is multiplied by weight).
+  ll_recal_large <- as.numeric(logLik(model_recal_large)) #same partial log likelihood as original model
+  
+  # Method 2: Recalibration
+  model_recal <- coxph(Surv(time, event) ~ pirx,  weights = wt, data = df)
+  ll_recal <- as.numeric(logLik(model_recal))
+
+  # Method 3: Revision (based on pre-selection)
+  model_rev <- coxph(Surv(time, event) ~ . -wt ,  weights = wt, data = df)
+  ll_rev <- as.numeric(logLik(model_rev))
+  df_rev <- ncol(X)
+
+  # Calculate difference in partial log likelihoods
+  dev_keep_recal_large <- 2*(ll_rev - ll_recal_large)
+  dev_keep_recal <- 2*(ll_rev - ll_recal)
+  
+  pval1 <- (1 - pchisq(dev_keep_recal_large, df_rev))
+  pval2 <- (1 - pchisq(dev_keep_recal, df_rev - 1))
+  
+  stats <- data.frame(round(dev_keep_recal_large,2), df_rev, round(pval1,4),
+                      round(dev_keep_recal,2), df_rev - 1, round(pval2,4))
+  colnames(stats) <- c("Test1_chisq", "Test1_df", "Test1_pval",
+                       "Test2_chisq", "Test2_df", "Test2_pval")
+  
+  # See if difference in model fit is significant
+  test1 <- pval1 < alpha_test
+  test2 <- pval2 < alpha_test
+  
+  # See which model is chosen, index_test indicates the chosen model
+  test_recal_large <- 1 * ((!test1))
+  test_recal <- 2 * ((test1) & (!test2))
+  test_rev <- 3 * ((test1) & (test2))
+  index_test <- (test_recal_large + test_recal + test_rev)
+  
+  # Output of the function
+  model <- c("Model with updated baseline risk",
+               "Recalibrated model",
+               "Model Revision")[index_test]
+  cat("Method chosen by closed test procedure:", model, "\n\n",
+      "Summary of results:\n", "\n")
+  res <- list(summary = stats)
+  return(res)
+}
+
+ClosedTestCox(data = dat, nimp = nimp)
+
+#save.image("WS_5_Selection.RData")
+```

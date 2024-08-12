@@ -1,0 +1,624 @@
+---
+title: "Updating and extension of PREDICT using MINDACT - continued"
+author: "Mary Ann Binuya"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+  pdf_document: default
+---
+
+# Aim
+1. To check the performance of the following updated/extended models:\
+&emsp;Method 1. Model with recalibration-in-the-large (only baseline is re-estimated)\
+&emsp;Method 2. Recalibrated model (both baseline and slope are re-estimated)\
+&emsp;Method 3. Revised model (additional regression coefficients are added)\
+&emsp;Method 3. Revised model (LASSO)\
+
+```{r setup, include=FALSE}
+#Set libpath
+#.libPaths(c("U:/libraries", .libPaths()))
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = TRUE,
+  warning = FALSE,
+  fig.retina = 4,
+  fig.path = "Output/4 Extension - Val plots and DCA/")
+
+#Load libraries
+library(dplyr) #for data manipulations
+library(survival) #for survival analysis
+library(rms) #for survival analysis
+library(glmnet) #supports survival models
+library(caret) #doesn'"'t support survival models
+library(writexl) #for exporting datasets
+library(ggpubr) #for arranging plots
+```
+
+# Load data
+```{r Load}
+# Load data and results of original model"s external validation
+  load("WS_4_PREDICT_extension.RData")
+```
+
+# LRT
+```{r LRT}
+#Method1:
+pool_lrt(data = dat, impvar=".imp", nimp = 20,
+         formula = form1g,
+         nullformula = form1)
+
+#Method2:
+pool_lrt(data = dat, impvar=".imp", nimp = 20,
+         formula = form2g,
+         nullformula = form2)
+
+#Method3: Full revision:
+formfull <- Surv(time, eventbc) ~ pirx + age.start + size + grade + nodes + pr +
+                                  her2 + ki67 + generation + horm + traz + bis
+formfullg <- Surv(time, eventbc) ~ pirx + grisk + age.start + size + grade + nodes + pr +
+                                  her2 + ki67 + generation + horm + traz + bis
+pool_lrt(data = dat, impvar=".imp", nimp = 20,
+         formula = formfullg,
+         nullformula = formfull)
+
+#Method3: LASSO --> do not report
+  #LL without grisk
+    covariates <- dat %>% select(pirx, age.start, size, grade, nodes, pr, her2, ki67,
+                 generation, horm, traz, bis)
+    X <- model.matrix( ~ ., covariates)[, -1]
+    Y <- cbind(time = dat$time, status = dat$eventbc)
+    df <- data.frame(Y, X)
+    
+    model_rev <- glmnet(X, Y, family = "cox", lambda = 0) #no penalization
+    model_null <- coxph(Surv(time, status) ~ 1, data = df)
+    ll_null <- model_null$loglik
+    ll_sat <- model_rev$nulldev / 2 + ll_null
+    ll_rev <- ll_sat - deviance(model_rev) / 2
+    df_rev <- length(coef(model_rev, s = 0)@x)
+  
+  #LL with grisk
+    covariates_g <- dat  %>% select(pirx, grisk, age.start, size, grade, nodes, pr, her2, ki67,
+                 generation, horm, traz, bis)
+    X_g <- model.matrix( ~ ., covariates_g)[, -1]
+    df_g <- data.frame(Y, X_g)
+    
+    model_rev_g <- glmnet(X_g, Y, family = "cox", lambda = 0) #no penalization
+    model_null <- coxph(Surv(time, status) ~ 1, data = df)
+    ll_null <- model_null$loglik
+    ll_sat_g <- model_rev_g$nulldev / 2 + ll_null
+    ll_rev_g <- ll_sat_g - deviance(model_rev_g) / 2
+    df_rev_g <- length(coef(model_rev_g, s = 0)@x)
+    
+  #LRT (non-penalized LASSO models):
+    dev <- 2*(ll_rev_g - ll_rev)
+    pval <- (1 - pchisq(dev, df_rev_g-df_rev))
+    cbind(dev, pval)
+```
+
+# Calibration plots
+```{r Valplots, fig.height=5, fig.width=5}
+calplot2df_C <- function(data1, data2, tmax, main, limit, size_lab = 1, size_legend = 0.5, triangles = FALSE, g, Cdif){
+  #data1 = risk_df file without grisk
+  #data2 = risk_df file with grisk
+
+  # Predicted risks for data1
+  data1$x1 <- data1$predicted_risk
+  data1$x1.ll <- log(-log(1 - data1$x1))
+  
+  # Predicted risks for data2
+  data2$x2 <- data2$predicted_risk
+  data2$x2.ll <- log(-log(1 - data2$x2))
+  
+  model1 <- cph(Surv(time, event) ~ rcs(x1.ll, 5), data = data1, x = TRUE, y = TRUE, surv = TRUE)
+  model2 <- cph(Surv(time, event) ~ rcs(x2.ll, 5), data = data2, x = TRUE, y = TRUE, surv = TRUE)
+  
+  # Observed risks for data1
+  xx1 <- seq(quantile(data1$x1, prob = 0.01), quantile(data1$x1, prob = 0.99), length = 100)
+  xx1.ll <- log(-log(1 - xx1))
+  xx1.ll.df <- data.frame(x1.ll = xx1.ll)
+  y1 <- 1 - survest(model1, newdata = xx1.ll.df, times = tmax)$surv
+  y1.lower <- 1 - survest(model1, newdata = xx1.ll.df, times = tmax)$upper
+  y1.upper <- 1 - survest(model1, newdata = xx1.ll.df, times = tmax)$lower
+  
+  # Observed risks for data2
+  xx2 <- seq(quantile(data2$x2, prob = 0.01), quantile(data2$x2, prob = 0.99), length = 100)
+  xx2.ll <- log(-log(1 - xx2))
+  xx2.ll.df <- data.frame(x2.ll = xx2.ll)
+  y2 <- 1 - survest(model2, newdata = xx2.ll.df, times = tmax)$surv
+  y2.lower <- 1 - survest(model2, newdata = xx2.ll.df, times = tmax)$upper
+  y2.upper <- 1 - survest(model2, newdata = xx2.ll.df, times = tmax)$lower
+  
+  # Plot parameters
+  xlim <- c(0, limit+0.01)
+  ylim <- c(0, limit+0.01)
+  xlab <- "Predicted probability"
+  ylab <- "Observed proportion"
+  
+  # Plot
+  par(las = 1, xaxs = "i", yaxs = "i")
+  plot(0, 0, type = "n",
+       xlim = xlim, ylim = ylim,
+       xlab = xlab, ylab = ylab,
+       main = main, cex.main = 1,
+       cex.lab = size_lab, cex.axis = size_lab, lwd = 2)
+  polygon(c(xx1, rev(xx1), xx1[1]),
+          c(y1.lower, rev(y1.upper), y1.lower[1]),
+          border = NA, density = 50, angle = -20, col = "light gray")
+  polygon(c(xx2, rev(xx2), xx2[1]),
+          c(y2.lower, rev(y2.upper), y2.lower[1]),
+          border = NA, density = 50, angle = 20, col = "light gray")
+  abline(coef = c(0, 1), lty = 1, col = "gray") #diagonal line
+  lines(xx1, y1, lwd = 2, col = "black")
+  lines(xx2, y2, lty = 2, lwd = 2, col = "black")  # Add a second line (data2) in blue
+  
+  # Triangles
+  if (triangles) {
+    q1 <- Hmisc::cut2(data1$x1, levels.mean = TRUE, g = g)
+    q2 <- Hmisc::cut2(data2$x2, levels.mean = TRUE, g = g)
+    means1 <- as.double(levels(q1))
+    means2 <- as.double(levels(q2))
+    y1 <- 1-survest(model1, newdata=data1, times = tmax)$surv
+    y2 <- 1-survest(model2, newdata=data2, times = tmax)$surv
+    prop1 <- tapply(y1, q1, mean)
+    prop2 <- tapply(y2, q2, mean)
+    points(means1, prop1, pch = 17, cex = 1, col = "black")
+    points(means2, prop2, pch = 17, cex = 1, col = "black")
+  }
+  
+  # Legend
+  legend("topleft", legend = c("Model without MammaPrint", "Model with MammaPrint"),
+         col = c("black", "black"), lty = c(1, 2), lwd = 2, cex = size_legend, bty = "n")
+  
+  # Text
+  text(x=limit-0.03, y=0.005, labels=paste("C difference: ", Cdif, sep=""), cex=0.8, pos=4)
+}
+
+# Method 1:
+calplot2df_C(data1 = form1_riskdf,
+        data2 = form1g_riskdf,
+        tmax = 5,
+        main = "Recalibration-in-the-large",
+        limit = 0.1,
+        size_lab = 0.75,
+        size_legend = 0.75,
+        triangles = FALSE,
+        g = 5,
+        Cdif = "0.03")
+
+# Method 2:
+calplot2df_C(data1 = form2_riskdf,
+        data2 = form2g_riskdf,
+        tmax = 5,
+        main = "Recalibration",
+        limit = 0.1,
+        size_lab = 0.75,
+        size_legend = 0.75,
+        triangles = FALSE,
+        g = 5,
+        Cdif = "0.03")
+
+# Method 3 (backward selection with shrinkage)
+calplot2df_C(data1 = form3_riskdf,
+        data2 = form3g_riskdf,
+        tmax = 5,
+        main = "Revision (backward selection with shrinkage)",
+        limit = 0.1,
+        size_lab = 0.75,
+        size_legend = 0.75,
+        triangles = FALSE,
+        g = 5,
+        Cdif = "0.02")
+
+# Method 3 (LASSO): training dataset
+calplot2df_C(data1 = form4train_riskdf,
+        data2 = form4gtrain_riskdf,
+        tmax = 5,
+        main = "Revision (LASSO) - training dataset",
+        limit = 0.1,
+        size_lab = 0.75,
+        size_legend = 0.75,
+        triangles = FALSE,
+        g = 5,
+        Cdif = "0.02")
+
+# Method 3 (LASSO): test dataset
+calplot2df_C(data1 = form4test_riskdf,
+        data2 = form4gtest_riskdf,
+        tmax = 5,
+        main = "Revision (LASSO) - test dataset",
+        limit = 0.1,
+        size_lab = 0.75,
+        size_legend = 0.75,
+        triangles = FALSE,
+        g = 5,
+        Cdif = "0.02")
+```
+
+# Decision curves
+```{r DCA_plots, fig.height=5, fig.width=7}
+# Method 1
+  eventrate = 1 - summary(survfit(Surv(time, event) ~ 1, data = form0_riskdf), times = tmax)$surv
+  
+  #Net TP
+  par(las = 1, xaxs = "i", yaxs = "i")
+  plot(form0_nb_TP$threshold,
+       form0_nb_TP$NB_all*1000,
+       type = "l", lwd = 3, lty = 1, col = "darkgray",
+       xlab = "Threshold probability", ylab = "Net benefit (per 1000)",
+       xlim = c(0, 0.15), ylim = c(-1, 5), bty = "n",
+       cex.lab = 1, cex.axis = 1)
+  smooth0 <- smooth.spline(form0_nb_TP$threshold, form0_nb_TP$NB*1000, spar=0.5)
+  lines(smooth0, type = "l", lwd = 3, col="black")
+  smooth1 <- smooth.spline(form0_nb_TP$threshold, form1_nb_TP$NB*1000, spar=0.5)
+  lines(smooth1, type = "l", lwd = 3, col="orange") #NB of Method 1 without grisk
+  smooth2 <- smooth.spline(form0_nb_TP$threshold, form1g_nb_TP$NB*1000, spar=0.5)
+  lines(smooth2, type = "l", lwd = 3, col="blue") #NB of Method 1 with grisk
+  abline(h=0, col="black", lwd=1)
+  #abline(v=0.12, col="black", lty=2)
+  abline(v=eventrate, col="black", lty=2)
+  legend("topright", legend = c("Treat all", "Original model", "Recalibration-in-the-large", "Recalibration-in-the-large with MammaPrint"),
+         lwd = 3, cex = 1, col = c("darkgray", "black", "orange", "blue"), bty = "n")
+  #title("MINDACT dataset (n=5920)", adj = 0.5, cex = 1.5)
+  #rect(xleft = 0.05, xright = 0.15, ybottom = par("usr")[3], ytop = par("usr")[4],
+  #     border = NA, col = adjustcolor("grey", alpha = 0.3))
+  
+  #Net TN
+  par(las = 1, xaxs = "i", yaxs = "i")
+  plot(form0_nb_TN$threshold,
+       form0_nb_TN$NB_none*1000,
+       type = "l", lwd = 3, lty = 1, col = "darkgray",
+       xlab = "Threshold probability", ylab = "Net benefit (per 1000)",
+       xlim = c(0, 0.15), ylim = c(-1, 1000), bty = "n",
+       cex.lab = 1, cex.axis = 1)
+  smooth0 <- smooth.spline(form0_nb_TN$threshold, form0_nb_TN$NB*1000, spar=0.5)
+  lines(smooth0, type = "l", lwd = 3, col="black")
+  smooth1 <- smooth.spline(form0_nb_TN$threshold, form1_nb_TN$NB*1000, spar=0.5)
+  lines(smooth1, type = "l", lwd = 3, col="orange") #NB of Method 1 without grisk
+  smooth2 <- smooth.spline(form0_nb_TN$threshold, form1g_nb_TN$NB*1000, spar=0.5)
+  lines(smooth2, type = "l", lwd = 3, col="blue") #NB of Method 1 with grisk
+  abline(h=0, col="black", lwd=1)
+  #abline(v=0.12, col="black", lty=2)
+  legend("bottomright", legend = c("Treat none", "Original model", "Recalibration-in-the-large", "Recalibration-in-the-large with MammaPrint"),
+         lwd = 3, cex = 1, col = c("darkgray", "black", "orange", "blue"), bty = "n")
+  #title("MINDACT dataset (n=5920)", adj = 0.5, cex = 1.5)
+  #rect(xleft = 0.05, xright = 0.15, ybottom = par("usr")[3], ytop = par("usr")[4],
+  #     border = NA, col = adjustcolor("grey", alpha = 0.3))
+  
+# Method 2
+  #Net TP
+  par(las = 1, xaxs = "i", yaxs = "i")
+  plot(form0_nb_TP$threshold,
+       form0_nb_TP$NB_all*1000,
+       type = "l", lwd = 3, lty = 1, col = "darkgray",
+       xlab = "Threshold probability", ylab = "Net benefit (per 1000)",
+       xlim = c(0, 0.15), ylim = c(-1, 5), bty = "n",
+       cex.lab = 1, cex.axis = 1)
+  smooth0 <- smooth.spline(form0_nb_TP$threshold, form0_nb_TP$NB*1000, spar=0.5)
+  lines(smooth0, type = "l", lwd = 3, col="black")
+  smooth1 <- smooth.spline(form0_nb_TP$threshold, form2_nb_TP$NB*1000, spar=0.5)
+  lines(smooth1, type = "l", lwd = 3, col="orange") #NB of Method 2 without grisk
+  smooth2 <- smooth.spline(form0_nb_TP$threshold, form2g_nb_TP$NB*1000, spar=0.5)
+  lines(smooth2, type = "l", lwd = 3, col="blue") #NB of Method 2 with grisk
+  abline(h=0, col="black", lwd=1)
+  #abline(v=0.12, col="black", lty=2)
+  abline(v=eventrate, col="black", lty=2)
+  legend("topright", legend = c("Treat all", "Original model", "Recalibration", "Recalibration with MammaPrint"),
+         lwd = 3, cex = 1, col = c("darkgray", "black", "orange", "blue"), bty = "n")
+  #title("MINDACT dataset (n=5920)", adj = 0.5, cex = 1.5)
+  #rect(xleft = 0.05, xright = 0.15, ybottom = par("usr")[3], ytop = par("usr")[4],
+  #     border = NA, col = adjustcolor("grey", alpha = 0.3))
+  
+  #Net TN
+  par(las = 1, xaxs = "i", yaxs = "i")
+  plot(form0_nb_TN$threshold,
+       form0_nb_TN$NB_none*1000,
+       type = "l", lwd = 3, lty = 1, col = "darkgray",
+       xlab = "Threshold probability", ylab = "Net benefit (per 1000)",
+       xlim = c(0, 0.15), ylim = c(-1, 1000), bty = "n",
+       cex.lab = 1, cex.axis = 1)
+  smooth0 <- smooth.spline(form0_nb_TN$threshold, form0_nb_TN$NB*1000, spar=0.5)
+  lines(smooth0, type = "l", lwd = 3, col="black")
+  smooth1 <- smooth.spline(form0_nb_TN$threshold, form2_nb_TN$NB*1000, spar=0.5)
+  lines(smooth1, type = "l", lwd = 3, col="orange") #NB of Method 2 without grisk
+  smooth2 <- smooth.spline(form0_nb_TN$threshold, form2g_nb_TN$NB*1000, spar=0.5)
+  lines(smooth2, type = "l", lwd = 3, col="blue") #NB of Method 2 with grisk
+  abline(h=0, col="black", lwd=1)
+  #abline(v=0.12, col="black", lty=2)
+  legend("bottomright", legend = c("Treat none", "Original model", "Recalibration", "Recalibration with MammaPrint"),
+         lwd = 3, cex = 1, col = c("darkgray", "black", "orange", "blue"), bty = "n")
+  #title("MINDACT dataset (n=5920)", adj = 0.5, cex = 1.5)
+  #rect(xleft = 0.05, xright = 0.15, ybottom = par("usr")[3], ytop = par("usr")[4],
+  #     border = NA, col = adjustcolor("grey", alpha = 0.3))
+
+# Method 3 - Revision (backward selection with shrinkage)
+  #Net TP
+  par(las = 1, xaxs = "i", yaxs = "i")
+  plot(form0_nb_TP$threshold,
+       form0_nb_TP$NB_all*1000,
+       type = "l", lwd = 3, lty = 1, col = "darkgray",
+       xlab = "Threshold probability", ylab = "Net benefit (per 1000)",
+       xlim = c(0, 0.15), ylim = c(-1, 5), bty = "n",
+       cex.lab = 1, cex.axis = 1)
+  smooth0 <- smooth.spline(form0_nb_TP$threshold, form0_nb_TP$NB*1000, spar=0.5)
+  lines(smooth0, type = "l", lwd = 3, col="black")
+  smooth1 <- smooth.spline(form0_nb_TP$threshold, form3_nb_TP$NB*1000, spar=0.5)
+  lines(smooth1, type = "l", lwd = 3, col="orange") #NB of Method 3 without grisk
+  smooth2 <- smooth.spline(form0_nb_TP$threshold, form3g_nb_TP$NB*1000, spar=0.5)
+  lines(smooth2, type = "l", lwd = 3, col="blue") #NB of Method 3 with grisk
+  abline(h=0, col="black", lwd=1)
+  #abline(v=0.12, col="black", lty=2)
+  abline(v=eventrate, col="black", lty=2)
+  legend("topright", legend = c("Treat all", "Original model", "Model revision", "Model revision with MammaPrint"),
+         lwd = 3, cex = 1, col = c("darkgray", "black", "orange", "blue"), bty = "n")
+  #title("MINDACT dataset (n=5920)", adj = 0.5, cex = 1.5)
+  #rect(xleft = 0.05, xright = 0.15, ybottom = par("usr")[3], ytop = par("usr")[4],
+  #     border = NA, col = adjustcolor("grey", alpha = 0.3))
+  
+  #Net TN
+  par(las = 1, xaxs = "i", yaxs = "i")
+  plot(form0_nb_TN$threshold,
+       form0_nb_TN$NB_none*1000,
+       type = "l", lwd = 3, lty = 1, col = "darkgray",
+       xlab = "Threshold probability", ylab = "Net benefit (per 1000)",
+       xlim = c(0, 0.15), ylim = c(-1, 1000), bty = "n",
+       cex.lab = 1, cex.axis = 1)
+  smooth0 <- smooth.spline(form0_nb_TN$threshold, form0_nb_TN$NB*1000, spar=0.5)
+  lines(smooth0, type = "l", lwd = 3, col="black")
+  smooth1 <- smooth.spline(form0_nb_TN$threshold, form3_nb_TN$NB*1000, spar=0.5)
+  lines(smooth1, type = "l", lwd = 3, col="orange") #NB of Method 3 (backward with shrinkage) without grisk
+  smooth2 <- smooth.spline(form0_nb_TN$threshold, form3g_nb_TN$NB*1000, spar=0.5)
+  lines(smooth2, type = "l", lwd = 3, col="blue") #NB of Method 3 (backward with shrinkage) with grisk
+  abline(h=0, col="black", lwd=1)
+  #abline(v=0.12, col="black", lty=2)
+  legend("bottomright", legend = c("Treat none", "Original model", "Model revision", "Model revision with MammaPrint"),
+         lwd = 3, cex = 1, col = c("darkgray", "black", "orange", "blue"), bty = "n")
+  #title("MINDACT dataset (n=5920)", adj = 0.5, cex = 1.5)
+  #rect(xleft = 0.05, xright = 0.15, ybottom = par("usr")[3], ytop = par("usr")[4],
+  #     border = NA, col = adjustcolor("grey", alpha = 0.3))
+
+# Method 3 - LASSO (train dataset)
+  #Net TP
+  par(las = 1, xaxs = "i", yaxs = "i")
+  plot(form0_nb_TP$threshold,
+       form0_nb_TP$NB_all*1000,
+       type = "l", lwd = 3, lty = 1, col = "darkgray",
+       xlab = "Threshold probability", ylab = "Net benefit (per 1000)",
+       xlim = c(0, 0.15), ylim = c(-1, 5), bty = "n",
+       cex.lab = 1, cex.axis = 1)
+  smooth0 <- smooth.spline(form0_nb_TP$threshold, form0_nb_TP$NB*1000, spar=0.5)
+  lines(smooth0, type = "l", lwd = 3, col="black")
+  smooth1 <- smooth.spline(form0_nb_TP$threshold, form4train_nb_TP$NB*1000, spar=0.5)
+  lines(smooth1, type = "l", lwd = 3, col="orange") #NB of Method 3 (LASSO - train) without grisk
+  smooth2 <- smooth.spline(form0_nb_TP$threshold, form4gtrain_nb_TP$NB*1000, spar=0.5)
+  lines(smooth2, type = "l", lwd = 3, col="blue") #NB of Method 3 (LASSO - train) with grisk
+  abline(h=0, col="black", lwd=1)
+  #abline(v=0.12, col="black", lty=2)
+  abline(v=eventrate, col="black", lty=2)
+  legend("topright", legend = c("Treat all", "Original model", "Model revision (LASSO - train)", "Model revision with MammaPrint (LASSO - train)"),
+         lwd = 3, cex = 1, col = c("darkgray", "black", "orange", "blue"), bty = "n")
+  #title("MINDACT dataset (n=5920)", adj = 0.5, cex = 1.5)
+  #rect(xleft = 0.05, xright = 0.15, ybottom = par("usr")[3], ytop = par("usr")[4],
+  #     border = NA, col = adjustcolor("grey", alpha = 0.3))
+  
+  #Net TN
+  par(las = 1, xaxs = "i", yaxs = "i")
+  plot(form0_nb_TN$threshold,
+       form0_nb_TN$NB_none*1000,
+       type = "l", lwd = 3, lty = 1, col = "darkgray",
+       xlab = "Threshold probability", ylab = "Net benefit (per 1000)",
+       xlim = c(0, 0.15), ylim = c(-1, 1000), bty = "n",
+       cex.lab = 1, cex.axis = 1)
+  smooth0 <- smooth.spline(form0_nb_TN$threshold, form0_nb_TN$NB*1000, spar=0.5)
+  lines(smooth0, type = "l", lwd = 3, col="black")
+  smooth1 <- smooth.spline(form0_nb_TN$threshold, form4train_nb_TN$NB*1000, spar=0.5)
+  lines(smooth1, type = "l", lwd = 3, col="orange") #NB of Method 3 (LASSO - train) without grisk
+  smooth2 <- smooth.spline(form0_nb_TN$threshold, form4gtrain_nb_TN$NB*1000, spar=0.5)
+  lines(smooth2, type = "l", lwd = 3, col="blue") #NB of Method 3 (LASSO - train) with grisk
+  abline(h=0, col="black", lwd=1)
+  #abline(v=0.12, col="black", lty=2)
+  legend("bottomright", legend = c("Treat none", "Original model", "Model revision (LASSO - train)", "Model revision with MammaPrint (LASSO - train)"),
+         lwd = 3, cex = 1, col = c("darkgray", "black", "orange", "blue"), bty = "n")
+  #title("MINDACT dataset (n=5920)", adj = 0.5, cex = 1.5)
+  #rect(xleft = 0.05, xright = 0.15, ybottom = par("usr")[3], ytop = par("usr")[4],
+  #     border = NA, col = adjustcolor("grey", alpha = 0.3))
+  
+# Method 3 - LASSO (test dataset)
+  #Net TP
+  par(las = 1, xaxs = "i", yaxs = "i")
+  plot(form0_nb_TP$threshold,
+       form0_nb_TP$NB_all*1000,
+       type = "l", lwd = 3, lty = 1, col = "darkgray",
+       xlab = "Threshold probability", ylab = "Net benefit (per 1000)",
+       xlim = c(0, 0.15), ylim = c(-1, 5), bty = "n",
+       cex.lab = 1, cex.axis = 1)
+  smooth0 <- smooth.spline(form0_nb_TP$threshold, form0_nb_TP$NB*1000, spar=0.5)
+  lines(smooth0, type = "l", lwd = 3, col="black")
+  smooth1 <- smooth.spline(form0_nb_TP$threshold, form4test_nb_TP$NB*1000, spar=0.5)
+  lines(smooth1, type = "l", lwd = 3, col="orange") #NB of Method 3 (LASSO - test) without grisk
+  smooth2 <- smooth.spline(form0_nb_TP$threshold, form4gtest_nb_TP$NB*1000, spar=0.5)
+  lines(smooth2, type = "l", lwd = 3, col="blue") #NB of Method 3 (LASSO - test) with grisk
+  abline(h=0, col="black", lwd=1)
+  #abline(v=0.12, col="black", lty=2)
+  abline(v=eventrate, col="black", lty=2)
+  legend("topright", legend = c("Treat all", "Original model", "Model revision", "Model revision with MammaPrint"),
+         lwd = 3, cex = 1, col = c("darkgray", "black", "orange", "blue"), bty = "n")
+  #title("MINDACT dataset (n=5920)", adj = 0.5, cex = 1.5)
+  #rect(xleft = 0.05, xright = 0.15, ybottom = par("usr")[3], ytop = par("usr")[4],
+  #     border = NA, col = adjustcolor("grey", alpha = 0.3))
+  
+  #Net TN
+  par(las = 1, xaxs = "i", yaxs = "i")
+  plot(form0_nb_TN$threshold,
+       form0_nb_TN$NB_none*1000,
+       type = "l", lwd = 3, lty = 1, col = "darkgray",
+       xlab = "Threshold probability", ylab = "Net benefit (per 1000)",
+       xlim = c(0, 0.15), ylim = c(-1, 1000), bty = "n",
+       cex.lab = 1, cex.axis = 1)
+  smooth0 <- smooth.spline(form0_nb_TN$threshold, form0_nb_TN$NB*1000, spar=0.5)
+  lines(smooth0, type = "l", lwd = 3, col="black")
+  smooth1 <- smooth.spline(form0_nb_TN$threshold, form4test_nb_TN$NB*1000, spar=0.5)
+  lines(smooth1, type = "l", lwd = 3, col="orange") #NB of Method 3 (LASSO - test) without grisk
+  smooth2 <- smooth.spline(form0_nb_TN$threshold, form4gtest_nb_TN$NB*1000, spar=0.5)
+  lines(smooth2, type = "l", lwd = 3, col="blue") #NB of Method 3 (LASSO - test) with grisk
+  abline(h=0, col="black", lwd=1)
+  #abline(v=0.12, col="black", lty=2)
+  legend("bottomright", legend = c("Treat none", "Original model", "Model revision", "Model revision with MammaPrint"),
+         lwd = 3, cex = 1, col = c("darkgray", "black", "orange", "blue"), bty = "n")
+  #title("MINDACT dataset (n=5920)", adj = 0.5, cex = 1.5)
+  #rect(xleft = 0.05, xright = 0.15, ybottom = par("usr")[3], ytop = par("usr")[4],
+  #     border = NA, col = adjustcolor("grey", alpha = 0.3))
+```
+
+# Combined decision curves
+```{r DCA_plots_combined, fig.height=16, fig.width=15}
+# Calculation of 5-year PREDICT event rate
+eventrate <- 1 - summary(survfit(Surv(time, event) ~ 1, data = form0_riskdf), times = tmax)$surv
+
+# Setting up graphical parameters common to all plots
+par(las = 1, xaxs = "i", yaxs = "i", mar = c(5, 6, 4, 2) + 0.5)
+
+# Plotting Net Benefit for True Positives (TP) across different methods
+plotNetTP <- function(data1, data1g, method_label1, method_label2) {
+  plot(form0_nb_TP$threshold,
+       form0_nb_TP$NB_all*1000,
+       type = "l", lwd = 3, lty = 1, col = "darkgray",
+       xlab = "Threshold probability", ylab = "Net TP benefit (per 1000)",
+       xlim = c(0, 0.16), ylim = c(-1, 5), bty = "n",
+       cex.lab = 2, cex.axis = 2,
+       mgp = c(3.5, 1, 0)) 
+  smooth0 <- smooth.spline(form0_nb_TP$threshold, form0_nb_TP$NB*1000, spar=0.5)
+  lines(smooth0, type = "l", lwd = 3, col="black")
+  smooth1 <- smooth.spline(form0_nb_TP$threshold, data1$NB*1000, spar=0.5)
+  lines(smooth1, type = "l", lwd = 3, col="orange") #NB of Method 1 without grisk
+  smooth2 <- smooth.spline(form0_nb_TP$threshold, data1g$NB*1000, spar=0.5)
+  lines(smooth2, type = "l", lwd = 3, col="blue") #NB of Method 1 with grisk
+  abline(h=0, col="black", lwd=1)
+  abline(v=eventrate, col="darkgray", lty=2)
+  legend("topright", legend = c("Treat all", "Original model", method_label1, method_label2),
+         lwd = 3, cex = 2, col = c("darkgray", "black", "orange", "blue"), bty = "n")
+  #rect(xleft = 0.05, xright = 0.15, ybottom = par("usr")[3], ytop = par("usr")[4],
+  #     border = NA, col = adjustcolor("grey", alpha = 0.3))
+}
+
+# Plotting Net Benefit for True Negatives (TN) across different methods
+plotNetTN <- function(data1, data1g, method_label1, method_label2) {
+    plot(form0_nb_TN$threshold,
+       form0_nb_TN$NB_none*1000,
+       type = "l", lwd = 3, lty = 1, col = "darkgray",
+       xlab = "", ylab = "",
+       xlim = c(0, 0.16), ylim = c(-1, 1000), bty = "n",
+       cex.axis = 2)
+  title(xlab = "Threshold probability", mgp = c(3.5, 1, 0), cex.lab = 2)
+  title(ylab = "Net TN benefit (per 1000)", mgp = c(5, 1, 0), cex.lab = 2)
+  smooth0 <- smooth.spline(form0_nb_TN$threshold, form0_nb_TN$NB*1000, spar=0.5)
+  lines(smooth0, type = "l", lwd = 3, col="black")
+  smooth1 <- smooth.spline(form0_nb_TN$threshold, data1$NB*1000, spar=0.5)
+  lines(smooth1, type = "l", lwd = 3, col="orange") #NB of Method 1 without grisk
+  smooth2 <- smooth.spline(form0_nb_TN$threshold, data1g$NB*1000, spar=0.5)
+  lines(smooth2, type = "l", lwd = 3, col="blue") #NB of Method 1 with grisk
+  abline(h=0, col="black", lwd=1)
+  legend("bottomright", legend = c("Treat none", "Original model", method_label1, method_label2),
+         lwd = 3, cex = 2, col = c("darkgray", "black", "orange", "blue"), bty = "n")
+  #rect(xleft = 0.05, xright = 0.15, ybottom = par("usr")[3], ytop = par("usr")[4],
+  #     border = NA, col = adjustcolor("grey", alpha = 0.3))
+}
+
+layout(matrix(1:6, nrow = 3, ncol = 2, byrow = TRUE))
+
+plotNetTP(form1_nb_TP, form1g_nb_TP, "Recalibration-in-the-large", "Recalibration-in-the-large with MammaPrint")
+title(main = "A", adj = 0, line = 1, cex.main = 2)
+plotNetTN(form1_nb_TN, form1g_nb_TN, "Recalibration-in-the-large", "Recalibration-in-the-large with MammaPrint")
+title(main = "B", adj = 0, line = 1, cex.main = 2)
+
+plotNetTP(form2_nb_TP, form2g_nb_TP, "Recalibration ", "Recalibration with MammaPrint")
+title(main = "C", adj = 0, line = 1, cex.main = 2)
+plotNetTN(form2_nb_TN, form2g_nb_TN, "Recalibration ", "Recalibration with MammaPrint")
+title(main = "D", adj = 0, line = 1, cex.main = 2)
+
+plotNetTP(form4test_nb_TP, form4gtest_nb_TP, "Revision", "Revision with MammaPrint")
+title(main = "E", adj = 0, line = 1, cex.main = 2)
+plotNetTN(form4test_nb_TN, form4gtest_nb_TN, "Revision", "Revision with MammaPrint")
+title(main = "F", adj = 0, line = 1, cex.main = 2)
+```
+
+# NB at specific thresholds
+```{r NB_at_thresholds}
+nb_at_thresholds <- function(nb_thresholds) {
+  
+  # Create a list of NB dataframes
+  data_frames <- list(
+  form0_nb_TP, #Method 0 - original model
+  form1_nb_TP, form1g_nb_TP, #Method 1 - recalibration-in-the-large
+  form2_nb_TP, form2g_nb_TP, #Method 2 - recalibration
+  form3_nb_TP, form3g_nb_TP, #Method 3 - backward selection with shrinkage
+  form4train_nb_TP, form4gtrain_nb_TP, #Method 3 - LASSO revision (train data)
+  form4test_nb_TP, form4gtest_nb_TP) #Method 3 - LASSO revision (test data)
+
+  # Add labels
+  data_frame_names <- c(
+    "Original model",
+    "1", "1 with grisk",
+    "2", "2 with grisk",
+    "3 (backward selection)", "3 with grisk (backward selection)",
+    "3 (LASSO) - train", "3 with grisk (LASSO) - train",
+    "3 (LASSO) - test", "3 with grisk (LASSO) - test")
+  
+  # Loop through list of NB dataframes
+  for (i in seq_along(data_frames)) {
+    df <- data_frames[[i]]
+    df_name <- data_frame_names[i]
+    df$threshold <- as.character(df$threshold)
+    
+    # Round columns and calculate NB per 1000 persons
+    df[, -1] <- round(df[, -1] * 1000, 0)
+    
+    # Output
+    cat("Method:", df_name, "\n")
+    cat("Thresholds:", nb_thresholds, "\n\n")
+    cat(df$NB[df$threshold %in% nb_thresholds], "\n\n")
+    }
+}
+
+nb_at_thresholds(nb_thresholds = c(0.030, 0.050, 0.100, 0.120, 0.150))
+
+nb_at_thresholds_TN <- function(nb_thresholds) {
+  
+  # Create a list of NB dataframes
+  data_frames <- list(
+  form0_nb_TN, #Method 0 - original model
+  form1_nb_TN, form1g_nb_TN, #Method 1 - recalibration-in-the-large
+  form2_nb_TN, form2g_nb_TN, #Method 2 - recalibration
+  form3_nb_TN, form3g_nb_TN, #Method 3 - backward selection with shrinkage
+  form4train_nb_TN, form4gtrain_nb_TN, #Method 3 - LASSO revision (train data)
+  form4test_nb_TN, form4gtest_nb_TN) #Method 3 - LASSO revision (test data)
+
+  # Add labels
+  data_frame_names <- c(
+    "Original model",
+    "1", "1 with grisk",
+    "2", "2 with grisk",
+    "3 (backward selection)", "3 with grisk (backward selection)",
+    "3 (LASSO) - train", "3 with grisk (LASSO) - train",
+    "3 (LASSO) - test", "3 with grisk (LASSO) - test")
+  
+  # Loop through list of NB dataframes
+  for (i in seq_along(data_frames)) {
+    df <- data_frames[[i]]
+    df_name <- data_frame_names[i]
+    df$threshold <- as.character(df$threshold)
+    
+    # Round columns and calculate NB per 1000 persons
+    df[, -1] <- round(df[, -1] * 1000, 0)
+    
+    # Output
+    cat("Method:", df_name, "\n")
+    cat("Thresholds:", nb_thresholds, "\n\n")
+    cat(df$NB[df$threshold %in% nb_thresholds], "\n\n")
+    }
+}
+
+nb_at_thresholds_TN(nb_thresholds = c(0.030, 0.050, 0.100, 0.120, 0.150))
+```

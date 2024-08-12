@@ -1,0 +1,1219 @@
+---
+title: "Updating and extension of PREDICT using MINDACT"
+author: "Mary Ann Binuya"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+  pdf_document: default
+---
+
+# Aim
+1. To check the performance of the following updated/extended models:\
+&emsp;Method 1. Model with recalibration-in-the-large (only baseline is re-estimated)\
+&emsp;Method 2. Recalibrated model (both baseline and slope are re-estimated)\
+&emsp;Method 3. Revised model (additional regression coefficients are added)\
+&emsp;Method 3. Revised model (LASSO)\
+
+```{r setup, include=FALSE}
+#Set libpath
+#.libPaths(c("U:/libraries", .libPaths()))
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = TRUE,
+  warning = FALSE,
+  fig.retina = 3,
+  fig.path = "Output/4 Extension/")
+
+#Load libraries
+library(dplyr) #for data manipulations
+library(survival) #for survival analysis
+library(rms) #for survival analysis
+library(glmnet) #supports survival models
+library(caret) #doesn't support survival models
+library(ggplot2) #calibration plots
+library(psfmi) #for pooled analysis on imputed data
+
+rm(list=ls())
+```
+
+# Load data
+```{r Load}
+# Load data and results of the external validation
+  load("WS_3_PREDICT_validation.RData")
+  
+  form0_res <- as.data.frame(mindact_res[-5])
+  
+  form0_riskdf <- risk_df
+  
+  rm(list=setdiff(ls(), c("dat", "tmax", "form0_res", "form0_riskdf", "form0_nb_TP", "form0_nb_TN")))
+  
+# Load functions
+  source("Functions/pool_perf.R")
+  
+  rm(pool_brier, pool_auc, calplot_auc) #remove non-necessary ones
+```
+
+# Method 1: Recalibration-in-the-large {.tabset}
+## Without genomic risk
+```{r Ril}
+form1 <- Surv(time, eventbc) ~ offset(pirx) #no coefs re-estimated here
+
+form1_c <- pool_c(data = dat,
+                   tvar="time", statvar="eventbc",
+                   impvar=".imp", nimp = 20,
+                   formula = form1,
+                   tmax = tmax, logit_trans = TRUE)
+
+form1_cal <- pool_cal(data = dat, 
+                      tvar="time", statvar="eventbc",
+                      impvar=".imp", nimp = 20,
+                      formula = form1,
+                      tmax = tmax, log_trans = TRUE) #log trans applied only for OE ratio
+
+form1_res <- c(form1_c, form1_cal[1:2])
+form1_res
+
+form1_riskdf<- form1_cal$pooled_risks
+
+  rm(form1_c, form1_cal)
+
+form1_nb_TP <- nb_fn_TP(data = form1_riskdf, tmax = tmax, thresholdmax = 0.2)
+form1_nb_TN <- nb_fn_TN(data = form1_riskdf, tmax = tmax, thresholdmax = 0.2)
+head(form1_nb_TP)
+head(form1_nb_TN)
+```
+
+## With genomic risk
+```{r Ril_w_grisk}
+form1g <- Surv(time, eventbc) ~ offset(pirx) + grisk #only coef for grisk is estimated
+
+centercept(data = dat, impvar=".imp", nimp = 20, formula = form1g)
+
+form1g_coefs <- pool_coefs(data = dat,
+                     impvar=".imp", nimp = 20,
+                     formula = form1g, exp_trans = FALSE) #exp_trans = FALSE produces betas not HRs
+
+form1g_c <- pool_c(data = dat,
+                   tvar="time", statvar="eventbc",
+                   impvar=".imp", nimp = 20,
+                   formula = form1g,
+                   tmax = tmax, logit_trans = TRUE)
+
+form1g_cal <- pool_cal(data = dat, 
+                      tvar="time", statvar="eventbc",
+                      impvar=".imp", nimp = 20,
+                      formula = form1g,
+                      tmax = tmax, log_trans = TRUE) #log trans applied only for OE ratio
+form1g_coefs
+
+form1g_res <- c(form1g_c, form1g_cal[1:2])
+form1g_res
+
+form1g_riskdf<- form1g_cal$pooled_risks
+
+  rm(form1g_c, form1g_cal)
+
+form1g_nb_TP <- nb_fn_TP(data = form1g_riskdf, tmax = tmax, thresholdmax = 0.2)
+form1g_nb_TN <- nb_fn_TN(data = form1g_riskdf, tmax = tmax, thresholdmax = 0.2)
+head(form1g_nb_TP)
+head(form1g_nb_TN)
+```
+
+# Method 2. Recalibration {.tabset}
+## Without genomic risk
+```{r Recal}
+form2 <- Surv(time, eventbc) ~ pirx
+
+centercept(data = dat, impvar=".imp", nimp = 20, formula = form2)
+
+form2_coefs <- pool_coefs(data = dat,
+                     impvar=".imp", nimp = 20,
+                     formula = form2, exp_trans = FALSE) #exp_trans = FALSE produces betas not HRs
+
+form2_c <- pool_c(data = dat,
+                   tvar="time", statvar="eventbc",
+                   impvar=".imp", nimp = 20,
+                   formula = form2,
+                   tmax = tmax, logit_trans = TRUE)
+
+form2_cal <- pool_cal(data = dat, 
+                      tvar="time", statvar="eventbc",
+                      impvar=".imp", nimp = 20,
+                      formula = form2,
+                      tmax = tmax, log_trans = TRUE) #log trans applied only for OE ratio
+
+form2_coefs
+
+form2_res <- c(form2_c, form2_cal[1:2])
+form2_res
+
+form2_riskdf<- form2_cal$pooled_risks
+
+  rm(form2_c, form2_cal)
+
+form2_nb_TP <- nb_fn_TP(data = form2_riskdf, tmax = tmax, thresholdmax = 0.2)
+form2_nb_TN <- nb_fn_TN(data = form2_riskdf, tmax = tmax, thresholdmax = 0.2)
+head(form2_nb_TP)
+head(form2_nb_TN)
+```
+
+## With genomic risk
+```{r Recal_w_grisk}
+form2g <- Surv(time, eventbc) ~ pirx + grisk
+
+centercept(data = dat, impvar=".imp", nimp = 20, formula = form2g)
+
+form2g_coefs <- pool_coefs(data = dat,
+                     impvar=".imp", nimp = 20,
+                     formula = form2g, exp_trans = FALSE) #exp_trans = FALSE produces betas not HRs
+
+form2g_c <- pool_c(data = dat,
+                   tvar="time", statvar="eventbc",
+                   impvar=".imp", nimp = 20,
+                   formula = form2g,
+                   tmax = tmax, logit_trans = TRUE)
+
+form2g_cal <- pool_cal(data = dat, 
+                      tvar="time", statvar="eventbc",
+                      impvar=".imp", nimp = 20,
+                      formula = form2g,
+                      tmax = tmax, log_trans = TRUE) #log trans applied only for OE ratio
+
+form2g_coefs
+
+form2g_res <- c(form2g_c, form2g_cal[1:2])
+form2g_res
+
+form2g_riskdf<- form2g_cal$pooled_risks
+
+  rm(form2g_c, form2g_cal)
+
+form2g_nb_TP <- nb_fn_TP(data = form2g_riskdf, tmax = tmax, thresholdmax = 0.2)
+form2g_nb_TN <- nb_fn_TN(data = form2g_riskdf, tmax = tmax, thresholdmax = 0.2)
+head(form2g_nb_TP)
+head(form2g_nb_TN)
+```
+
+# Method 3: Revision based on backward selection plus shrinkage {.tabset}
+
+## Without genomic risk
+```{r Rev}
+# Apply automatic backward selection to each imputed dataset. Covariates are selected based on pooled p-values (D1 method) using p=0.05 selection criterion. More info selection methods after imputation at  https://stefvanbuuren.name/fimd/sec-stepwise.html and vignette of psfmi package.
+
+fit3_select_bw <- psfmi_coxr(dat, nimp = 20, impvar = ".imp",
+                          Surv(time, eventbc) ~ pirx + age.start + size + grade +
+                          nodes + pr + her2 + ki67 + generation + horm + traz + bis,
+                          keep.predictors = "pirx", #retain this predictor(s) in the model
+                          p.crit=0.05, method="D1", direction = "BW")
+fit3_select_bw$predictors_final # pirx and traz retained
+
+# Calculate global shrinkage based on bootstrapping
+  set.seed(202309)
+  fit3_validate <- function (dat, nimp){
+    shrinkage <- bsurv_t <- numeric(nimp)
+    for (i in 1:nimp){
+      df <- dat %>% filter(.imp == i)
+      fit_cph <- cph(Surv(time, eventbc) ~ pirx + traz, x=T, y=T, surv=T, data=df)
+      vcox <- validate(fit_cph, method="boot", B=1000, type="individual", dxy=T)
+      shrinkage[i] <- vcox["Slope","index.corrected"] #shrinkage
+
+      fit_cox <- coxph(Surv(time, eventbc) ~ pirx + traz, data=df)
+      bhaz <- basehaz(fit_cox) #center at reference values
+      bhaz_t <- max(bhaz$hazard[bhaz$time <= tmax]) #baseline cumhaz at time t
+      bsurv_t[i] <- exp(-bhaz_t) #S0 = exp(-cumhaz)
+    }
+    return(list(penalty = round(mean(shrinkage), 2), bsurv = mean(bsurv_t)))
+  }
+  res_form3 <- fit3_validate(dat, 20) #shrinkage = 1 (no shrinkage necessary), bsurv = 0.992
+  res_form3
+
+form3 <- Surv(time, eventbc) ~ pirx + traz
+
+centercept(data = dat, impvar=".imp", nimp = 20, formula = form3)
+
+form3_coefs <- pool_coefs(data = dat,
+                     impvar=".imp", nimp = 20,
+                     formula = form3, exp_trans = FALSE) #get beta not HR
+
+form3_c <- pool_c(data = dat,
+                   tvar="time", statvar="eventbc",
+                   impvar=".imp", nimp = 20,
+                   formula = form3,
+                   tmax = tmax, logit_trans = TRUE)
+
+form3_cal <- pool_cal(data = dat, 
+                      tvar="time", statvar="eventbc",
+                      impvar=".imp", nimp = 20,
+                      formula = form3,
+                      tmax = tmax, log_trans = TRUE) #log trans applied only for OE ratio
+
+form3_coefs
+
+form3_res <- c(form3_c, form3_cal[1:2])
+form3_res
+
+form3_riskdf<- form3_cal$pooled_risks
+
+  rm(form3_c, form3_cal)
+
+form3_nb_TP <- nb_fn_TP(data = form3_riskdf, tmax = tmax, thresholdmax = 0.2)
+form3_nb_TN <- nb_fn_TN(data = form3_riskdf, tmax = tmax, thresholdmax = 0.2)
+head(form3_nb_TP)
+head(form3_nb_TN)
+```
+
+##  With genomic risk
+```{r Rev_w_grisk}
+form3g <- Surv(time, eventbc) ~ pirx + traz + grisk
+
+# Calculate global shrinkage based on bootstrapping
+  set.seed(202309)
+  fit3g_validate <- function (dat, nimp){
+    shrinkage <- bsurv_t <- numeric(nimp)
+    for (i in 1:nimp){
+      df <- dat %>% filter(.imp == i)
+      fit_cph <- cph(Surv(time, eventbc) ~ pirx + traz + grisk, x=T, y=T, surv=T, data=df)
+      vcox <- validate(fit_cph, method="boot", B=1000, type="individual", dxy=T)
+      shrinkage[i] <- vcox["Slope","index.corrected"] #shrinkage
+
+      fit_cox <- coxph(Surv(time, eventbc) ~ pirx + traz + grisk, data=df)
+      bhaz <- basehaz(fit_cox) #center at reference values
+      bhaz_t <- max(bhaz$hazard[bhaz$time <= tmax]) #baseline cumhaz at time t
+      bsurv_t[i] <- exp(-bhaz_t) #S0 = exp(-cumhaz)
+    }
+    return(list(penalty = round(mean(shrinkage),2), bsurv = mean(bsurv_t)))
+  }
+  res_form3g <- fit3g_validate(dat, 20) #shrinkage = 0.99 (apply manually), bsurv = 0.994
+  res_form3g
+  
+centercept(data = dat, impvar=".imp", nimp = 20, formula = form3g)
+
+form3g_coefs <- pool_coefs(data = dat,
+                     impvar=".imp", nimp = 20,
+                     formula = form3g, exp_trans = FALSE) #get beta not HR
+
+form3g_c <- pool_c(data = dat,
+                   tvar="time", statvar="eventbc",
+                   impvar=".imp", nimp = 20,
+                   formula = form3g,
+                   tmax = tmax, logit_trans = TRUE)
+
+form3g_cal <- pool_cal(data = dat, 
+                      tvar="time", statvar="eventbc",
+                      impvar=".imp", nimp = 20,
+                      formula = form3g,
+                      tmax = tmax, log_trans = TRUE) #log trans applied only for OE ratio
+
+form3g_coefs
+
+form3g_res <- c(form3g_c, form3g_cal[1:2])
+form3g_res
+
+form3g_riskdf<- form3g_cal$pooled_risks
+
+  rm(form3g_c, form3g_cal)
+
+form3g_nb_TP <- nb_fn_TP(data = form3g_riskdf, tmax = tmax, thresholdmax = 0.2)
+form3g_nb_TN <- nb_fn_TN(data = form3g_riskdf, tmax = tmax, thresholdmax = 0.2)
+head(form3g_nb_TP)
+head(form3g_nb_TN)
+```
+
+# Method 3: Revision based on LASSO {.tabset}
+
+## Training dataset - without genomic risk
+```{r Rev_LASSO_train}
+# Function to calculate baseline hazard and survival (Breslow). Based on gbm::basehaz.gbm
+  bres_basesurv <- function(time, event, lp, times.eval = NULL, centered = TRUE) {
+    if (is.null(times.eval)) {
+      times.eval <- sort(unique(time))
+    }
+    
+    t.unique <- sort(unique(time[event == 1L]))
+    alpha <- numeric(length(t.unique))
+    
+    for (i in seq_along(t.unique)) {
+      alpha[i] <- sum(time[event == 1L] == t.unique[i]) / sum(exp(lp[time >= t.unique[i]]))
+    }
+    
+    obj <- approx(t.unique, cumsum(alpha), yleft = 0, xout = times.eval, rule = 2) #cumhaz
+    
+    if (centered) {
+      obj$y <- obj$y * exp(mean(lp)) #mean centered
+    }
+    
+    obj$z <- exp(-obj$y) #basesurv
+    names(obj) <- c("times", "cum_haz", "base_surv")
+    return(obj)
+  }
+
+LASSOCox_train_perf <- function(dataframe, nimp, foldin, foldout){
+  
+  set.seed(202309)
+  i_coefs <- i_c <- i_slope <- i_OE <- list()
+  i_lambda <- i_bsurv <- i_centercept <- numeric(nimp)
+  
+  for (i in 1:nimp) {
+    
+    # Get ith imputed dataset
+    data <- dataframe %>%
+      filter(.imp == i) %>%
+      select(pirx, age.start, size, grade, nodes, pr, her2, ki67,
+             generation, horm, traz, bis, time, eventbc) %>%
+      rename(status = eventbc)
+    
+    n <- nrow(data)
+    p <- ncol(data) - 2 #remove time and status from count
+    nfold_outer <- foldout #set number of folders outer
+    nfold_inner <- foldin #set number of folders inner
+    data$subject <- seq_len(nrow(data))
+    
+    # Set up outer cross-validation
+    outer_folds <- createFolds(data$status, k = nfold_outer)  
+    
+    # Initialize placeholders for performance metrics, model coefficients, and predicted risks
+    model_coefs <- vector("list", length = length(outer_folds))
+    bsurv <- centercept <- lambda <- numeric(length(outer_folds))
+    c_indices <- slope_indices <- OEratio_indices <- numeric(length(outer_folds))
+    predicted_risks <- list()
+    
+    # Outer cross-validation loop
+    for (fold in seq_along(outer_folds)) {
+      
+      # Split data into training and testing sets
+      train_indices <- unlist(outer_folds[-fold])
+      test_indices <- unlist(outer_folds[[fold]])
+      train_data <- data[train_indices, ]
+      test_data <- data[test_indices, ]
+      
+      # Fit LASSO regularized Cox model (model selection and hyperparameter tuning)
+      X_train <- model.matrix( ~ ., dplyr::select(train_data, 1:p))[, -1] #creates dummies for categorical vars, removes "intercept" = [-1]
+      Y_train <- cbind(time = train_data$time, status = train_data$status)
+      
+      cvfit <- cv.glmnet(X_train, Y_train, family = "cox", nfolds = nfold_inner, type.measure = "deviance") #type.measure options for Cox: C or deviance (partial likelihood). C is not recommended for model comparisons: https://www.fharrell.com/post/addvalue/
+      
+      # Get optimal lambda
+      optimal_lambda <- cvfit$lambda.min
+      
+      # Fit LASSO regularized model with optimal lambda on outer train data
+      final_model <- glmnet(X_train, Y_train, family = "cox")
+      #note: ties are approximated using Breslow not Efron (default in survival::coxph) so glmnet(x, y, family="cox", lambda = 0) gives same coefs as coxph (y~x, ties="breslow")
+      lp_train <- predict(final_model, newx = X_train, type = "link", s = optimal_lambda, exact = FALSE) #type = "link" gives LP
+      lp_train_cen <- lp_train - mean(lp_train) #center at the mean lp of train data; alternatively: sum(coef(final_model)*colMeans(X_train))
+      bhaz_train_cen <- bres_basesurv(train_data$time, train_data$status, lp_train_cen, times.eval = tmax, centered = TRUE)
+      
+      # Store model specs from the final model
+      model_coefs[[fold]] <- as.matrix(coef(final_model, s = optimal_lambda))
+      centercept[fold] <- mean(lp_train)
+      bsurv[fold] <- bhaz_train_cen$base_surv
+      lambda[fold] <- optimal_lambda
+      
+      # Predict risk scores on TRAIN data
+      psurv <- bhaz_train_cen$base_surv ^ exp(lp_train_cen)
+      prisk <- as.numeric(1 - psurv)
+      predicted_risks[[fold]] <- data.frame(subject = train_data$subject, predrisk = prisk, time = train_data$time, status = train_data$status)
+      
+      # Calculate Observed proportion
+      surv_fit <- survfit(Surv(train_data$time, train_data$status) ~ 1)
+      orisk <- 1 - summary(surv_fit, times = tmax)$surv
+      orisk_l <- 1 - summary(surv_fit, times = tmax)$upper
+      orisk_u <- 1 - summary(surv_fit, times = tmax)$lower
+      
+      # Calculate performance metrics (model evaluation and testing)
+      
+      # Discrimination: C index
+      coxobj <- coxph(Surv(train_data$time, train_data$status) ~ lp_train_cen)
+      c_res <- concordance(coxobj, ymax = tmax)
+      c_indices[fold] <- c_res$concordance
+      
+      # Calibration: slope and O/E ratio
+      slope_indices[fold] <- coef(coxobj)
+      OEratio_indices[fold] <- orisk / mean(prisk)
+    }
+    
+    # Model specs for ith imputed dataset
+    coefs_fold <- do.call(cbind, model_coefs) #contains p*k sets of coefs
+    i_coefs[[i]] <- rowMeans(coefs_fold) #mean from k folds
+    
+    i_bsurv[[i]] <- mean(bsurv) #mean from k folds
+    i_centercept[[i]] <- mean(centercept) #mean from k folds
+    i_lambda[[i]] <- mean(lambda) #mean from k folds
+    
+    
+    # Calculate average performance metrics for ith imputed dataset
+    i_c[[i]] <- data.frame(C = mean(c_indices),
+                           C_SE = sd(c_indices) / sqrt(length(c_indices)))
+    i_slope[[i]] <- data.frame(CalSlope = mean(slope_indices),
+                               CalSlope_SE = sd(slope_indices) / sqrt(length(slope_indices)))
+    i_OE[[i]] <- data.frame(OEratio = mean(OEratio_indices),
+                            OEratio_SE = sd(OEratio_indices) / sqrt(length(OEratio_indices)))
+    
+    # Print calibration plots (not cloglog transformed) for each fold for each imputed dataset
+    caldf <- predicted_risks
+    calibration_data <- data.frame()
+    
+    for (fold in seq_along(caldf)) {
+      
+      df <- caldf[[fold]]
+      df$x <- df$predrisk
+      
+      # Create groups of predicted and observed survival probabilities
+      q10 <- cut(df$x,
+                breaks = quantile(df$x, probs = seq(0, 1, 0.1)),
+                include.lowest = TRUE)
+      df$q10_f <- factor(q10, levels = levels(q10),
+                        labels = c("q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8", "q9", "q10"))
+      
+      obs_q10 <- survfit(Surv(time, status) ~ q10_f, data = df)
+      obs_q10_tmax <- summary(obs_q10, times = tmax, extend = TRUE)
+      y <- 1 - obs_q10_tmax$surv
+      y_lower <- 1 - obs_q10_tmax$upper
+      y_upper <- 1 - obs_q10_tmax$lower
+      
+      # Add calibration data for the current fold to the data frame
+      fold_data <- data.frame(
+        x = as.numeric(tapply(df$x, df$q10_f, mean)),
+        y = y,
+        y.lower = y_lower,
+        y.upper = y_upper,
+        fold = factor(fold)
+      )
+      
+      calibration_data <- rbind(calibration_data, fold_data)
+    }
+    
+    # Color-blind friendly color palette (from the RColorBrewer package)
+    color_palette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000", "#FFFFFF")
+    
+    # Create the calibration plot
+    calibration_plot <- ggplot(calibration_data, aes(x = x, y = y, color = fold, group = fold)) +
+      geom_line(linewidth = 1.5) +
+      geom_point(size = 2) +
+      geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray") +
+      xlim(c(0, 0.1)) +
+      ylim(c(0, 0.1)) +
+      xlab(paste("Predicted probabilities at", tmax, "years", sep = " ")) +
+      ylab(paste("Observed proportion at", tmax, "years", sep = " ")) +
+      theme_minimal() +
+      labs(title = paste("Calibration Plot - Imputation", i)) +
+      theme(legend.position = "right",
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(), 
+            axis.line = element_line(color = "black"),
+            plot.title = element_text(hjust = 0.5)) +
+      scale_color_manual(name = "Fold", values = color_palette)
+    
+    print(calibration_plot)
+  }
+  
+  # Final outputs
+  mean_lambda <- mean(i_lambda) #mean from nimp datasets
+  
+  mean_bsurv <- mean(i_bsurv) #mean from nimp datasets
+  mean_cumhaz <- -log(mean_bsurv) #transform base surv back to cumhaz
+  
+  mean_center<- mean(i_centercept) #mean from nimp datasets
+  
+  coefs_combined <- do.call(cbind, i_coefs)
+  mean_coefs <- data.frame(rowMeans(coefs_combined)) #mean from nimp datasets
+  
+  predrisks_combined <- do.call(rbind, caldf)
+  mean_predrisks <- aggregate(. ~ subject, data = predrisks_combined, FUN = mean)
+  
+  # Combine performance from i imputed datasets
+  imp_c <- do.call(rbind, i_c)
+  imp_slope <- do.call(rbind, i_slope)
+  imp_OE <- do.call(rbind, i_OE)
+  
+  metrics_C <- pool_estimates(imp_c[,1], imp_c[,2], logit_trans = TRUE)
+  metrics_slope <- pool_estimates(imp_slope[,1], imp_slope[,2]) #no trans
+  metrics_OE <- pool_estimates(imp_OE[,1], imp_OE[,2], log_trans = TRUE)
+  
+  perfstat <- list(pooled_c = metrics_C, pooled_slope = metrics_slope, pooled_OEratio = metrics_OE)
+  
+  return(list(lambda = mean_lambda, basecumhaz = mean_cumhaz, centercept = mean_center, coefs = mean_coefs,
+              predrisks = mean_predrisks, perfstat = perfstat))
+}
+
+LASSOres_train <- LASSOCox_train_perf(dat, 20, 10, 10)
+
+# Predicted probabilities
+form4train_riskdf <- LASSOres_train$predrisks %>% rename(event = status, predicted_risk = predrisk)
+
+# Pool performance measures results
+form4train_res <- LASSOres_train$perfstat
+form4train_res
+
+# Net benefit
+form4train_nb_TP <- nb_fn_TP(data = form4train_riskdf, tmax = tmax, thresholdmax = 0.2)
+form4train_nb_TN <- nb_fn_TN(data = form4train_riskdf, tmax = tmax, thresholdmax = 0.2)
+head(form4train_nb_TP)
+head(form4train_nb_TN)
+```
+
+## Training dataset - with genomic risk
+```{r Rev_LASSO_train_w_grisk}
+# Function to run nested Cox LASSO on imputed datasets
+LASSOCoxg_train_perf <- function(dataframe, nimp, foldin, foldout){
+  
+  set.seed(202309)
+  i_coefs <- i_c <- i_slope <- i_OE <- list()
+  i_lambda <- i_bsurv <- i_centercept <- numeric(nimp)
+  
+  for (i in 1:nimp) {
+    
+    # Get ith imputed dataset
+    data <- dataframe %>%
+      filter(.imp == i) %>%
+      select(grisk, pirx, age.start, size, grade, nodes, pr, her2, ki67,
+             generation, horm, traz, bis, time, eventbc) %>%
+      rename(status = eventbc)
+    
+    n <- nrow(data)
+    p <- ncol(data) - 2 #remove time and status from count
+    nfold_outer <- foldout #set number of folders outer
+    nfold_inner <- foldin #set number of folders inner
+    data$subject <- seq_len(nrow(data))
+    
+    # Set up outer cross-validation
+    outer_folds <- createFolds(data$status, k = nfold_outer)  
+    
+    # Initialize placeholders for performance metrics, model coefficients, and predicted risks
+    model_coefs <- vector("list", length = length(outer_folds))
+    bsurv <- centercept <- lambda <- numeric(length(outer_folds))
+    c_indices <- slope_indices <- OEratio_indices <- numeric(length(outer_folds))
+    predicted_risks <- list()
+    
+    # Outer cross-validation loop
+    for (fold in seq_along(outer_folds)) {
+      
+      # Split data into training and testing sets
+      train_indices <- unlist(outer_folds[-fold])
+      test_indices <- unlist(outer_folds[[fold]])
+      train_data <- data[train_indices, ]
+      test_data <- data[test_indices, ]
+      
+      # Fit LASSO regularized Cox model (model selection and hyperparameter tuning)
+      X_train <- model.matrix( ~ ., dplyr::select(train_data, 1:p))[, -1] #creates dummies for categorical vars, removes "intercept" = [-1]
+      Y_train <- cbind(time = train_data$time, status = train_data$status)
+      
+      cvfit <- cv.glmnet(X_train, Y_train, family = "cox", nfolds = nfold_inner, type.measure = "deviance") #type.measure options for Cox: C or deviance (partial likelihood). C is not recommended for model comparisons: https://www.fharrell.com/post/addvalue/
+      
+      # Get optimal lambda
+      optimal_lambda <- cvfit$lambda.min
+      
+      # Fit LASSO regularized model with optimal lambda on outer train data
+      final_model <- glmnet(X_train, Y_train, family = "cox")
+      #note: ties are approximated using Breslow not Efron (default in survival::coxph) so glmnet(x, y, family="cox", lambda = 0) gives same coefs as coxph (y~x, ties="breslow")
+      lp_train <- predict(final_model, newx = X_train, type = "link", s = optimal_lambda, exact = FALSE) #type = "link" gives LP
+      lp_train_cen <- lp_train - mean(lp_train) #center at the mean lp of train data; alternatively: sum(coef(final_model)*colMeans(X_train))
+      bhaz_train_cen <- bres_basesurv(train_data$time, train_data$status, lp_train_cen, times.eval = tmax, centered = TRUE)
+      
+      # Store model specs from the final model
+      model_coefs[[fold]] <- as.matrix(coef(final_model, s = optimal_lambda))
+      centercept[fold] <- mean(lp_train)
+      bsurv[fold] <- bhaz_train_cen$base_surv
+      lambda[fold] <- optimal_lambda
+      
+      # Predict risk scores on TRAIN data
+      psurv <- bhaz_train_cen$base_surv ^ exp(lp_train_cen)
+      prisk <- as.numeric(1 - psurv)
+      predicted_risks[[fold]] <- data.frame(subject = train_data$subject, predrisk = prisk, time = train_data$time, status = train_data$status)
+      
+      # Calculate Observed proportion
+      surv_fit <- survfit(Surv(train_data$time, train_data$status) ~ 1)
+      orisk <- 1 - summary(surv_fit, times = tmax)$surv
+      orisk_l <- 1 - summary(surv_fit, times = tmax)$upper
+      orisk_u <- 1 - summary(surv_fit, times = tmax)$lower
+      
+      # Calculate performance metrics (model evaluation and testing)
+      
+      # Discrimination: C index
+      coxobj <- coxph(Surv(train_data$time, train_data$status) ~ lp_train_cen)
+      c_res <- concordance(coxobj, ymax = tmax)
+      c_indices[fold] <- c_res$concordance
+      
+      # Calibration: slope and O/E ratio
+      slope_indices[fold] <- coef(coxobj)
+      OEratio_indices[fold] <- orisk / mean(prisk)
+    }
+    
+    # Model specs for ith imputed dataset
+    coefs_fold <- do.call(cbind, model_coefs) #contains p*k sets of coefs
+    i_coefs[[i]] <- rowMeans(coefs_fold) #mean from k folds
+    
+    i_bsurv[[i]] <- mean(bsurv) #mean from k folds
+    i_centercept[[i]] <- mean(centercept) #mean from k folds
+    i_lambda[[i]] <- mean(lambda) #mean from k folds
+    
+    
+    # Calculate average performance for ith imputed dataset
+    i_c[[i]] <- data.frame(C = mean(c_indices),
+                           C_SE = sd(c_indices) / sqrt(length(c_indices)))
+    i_slope[[i]] <- data.frame(CalSlope = mean(slope_indices),
+                               CalSlope_SE = sd(slope_indices) / sqrt(length(slope_indices)))
+    i_OE[[i]] <- data.frame(OEratio = mean(OEratio_indices),
+                            OEratio_SE = sd(OEratio_indices) / sqrt(length(OEratio_indices)))
+    
+    # Print calibration plots (not cloglog transformed) for each fold for each imputed dataset
+    caldf <- predicted_risks
+    calibration_data <- data.frame()
+    
+    for (fold in seq_along(caldf)) {
+      
+      df <- caldf[[fold]]
+      df$x <- df$predrisk
+      
+      # Create groups of predicted and observed survival probabilities
+      q10 <- cut(df$x,
+                breaks = quantile(df$x, probs = seq(0, 1, 0.1)),
+                include.lowest = TRUE)
+      df$q10_f <- factor(q10, levels = levels(q10),
+                        labels = c("q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8", "q9", "q10"))
+      
+      obs_q10 <- survfit(Surv(time, status) ~ q10_f, data = df)
+      obs_q10_tmax <- summary(obs_q10, times = tmax, extend = TRUE)
+      y <- 1 - obs_q10_tmax$surv
+      y_lower <- 1 - obs_q10_tmax$upper
+      y_upper <- 1 - obs_q10_tmax$lower
+      
+      # Add calibration data for the current fold to the data frame
+      fold_data <- data.frame(
+        x = as.numeric(tapply(df$x, df$q10_f, mean)),
+        y = y,
+        y.lower = y_lower,
+        y.upper = y_upper,
+        fold = factor(fold)
+      )
+      
+      calibration_data <- rbind(calibration_data, fold_data)
+    }
+    
+    # Color-blind friendly color palette (from the RColorBrewer package)
+    color_palette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000", "#FFFFFF")
+    
+    # Create the calibration plot
+    calibration_plot <- ggplot(calibration_data, aes(x = x, y = y, color = fold, group = fold)) +
+      geom_line(linewidth = 1.5) +
+      geom_point(size = 2) +
+      geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray") +
+      xlim(c(0, 0.1)) +
+      ylim(c(0, 0.1)) +
+      xlab(paste("Predicted probabilities at", tmax, "years", sep = " ")) +
+      ylab(paste("Observed proportion at", tmax, "years", sep = " ")) +
+      theme_minimal() +
+      labs(title = paste("Calibration Plot - Imputation", i)) +
+      theme(legend.position = "right",
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(), 
+            axis.line = element_line(color = "black"),
+            plot.title = element_text(hjust = 0.5)) +
+      scale_color_manual(name = "Fold", values = color_palette)
+    
+    print(calibration_plot)
+  }
+  
+  # Final outputs
+  mean_lambda <- mean(i_lambda) #mean from nimp datasets
+  
+  mean_bsurv <- mean(i_bsurv) #mean from nimp datasets
+  mean_cumhaz <- -log(mean_bsurv) #transform base surv back to cumhaz
+  
+  mean_center<- mean(i_centercept) #mean from nimp datasets
+  
+  coefs_combined <- do.call(cbind, i_coefs)
+  mean_coefs <- data.frame(rowMeans(coefs_combined)) #mean from nimp datasets
+  
+  predrisks_combined <- do.call(rbind, caldf)
+  mean_predrisks <- aggregate(. ~ subject, data = predrisks_combined, FUN = mean)
+  
+  # Combine performance from i imputed datasets
+  imp_c <- do.call(rbind, i_c)
+  imp_slope <- do.call(rbind, i_slope)
+  imp_OE <- do.call(rbind, i_OE)
+  
+  metrics_C <- pool_estimates(imp_c[,1], imp_c[,2], logit_trans = TRUE)
+  metrics_slope <- pool_estimates(imp_slope[,1], imp_slope[,2]) #no trans
+  metrics_OE <- pool_estimates(imp_OE[,1], imp_OE[,2], log_trans = TRUE)
+  
+  perfstat <- list(pooled_c = metrics_C, pooled_slope = metrics_slope, pooled_OEratio = metrics_OE)
+  
+  return(list(lambda = mean_lambda, basecumhaz = mean_cumhaz, centercept = mean_center, coefs = mean_coefs,
+              predrisks = mean_predrisks, perfstat = perfstat))
+}
+
+LASSOresg_train <- LASSOCoxg_train_perf(dat, 20, 10, 10)
+
+# Predicted probabilities
+form4gtrain_riskdf <- LASSOresg_train$predrisks %>% rename(event = status, predicted_risk = predrisk)
+
+# Pool performance measures results
+form4gtrain_res <- LASSOresg_train$perfstat
+form4gtrain_res
+
+# Net benefit
+form4gtrain_nb_TP <- nb_fn_TP(data = form4gtrain_riskdf, tmax = tmax, thresholdmax = 0.2)
+form4gtrain_nb_TN <- nb_fn_TN(data = form4gtrain_riskdf, tmax = tmax, thresholdmax = 0.2)
+head(form4gtrain_nb_TP)
+head(form4gtrain_nb_TN)
+```
+
+
+## Test dataset - without genomic risk
+```{r Rev_LASSO_test}
+# Function to run nested Cox LASSO on imputed datasets
+LASSOCox_test_perf <- function(dataframe, nimp, foldin, foldout){
+    
+    set.seed(202309)
+    i_coefs <- i_c <- i_slope <- i_OE <- list()
+    i_lambda <- i_bsurv <- i_centercept <- numeric(nimp)
+      
+    for (i in 1:nimp) {
+    
+    # Get ith imputed dataset
+    data <- dataframe %>%
+      filter(.imp == i) %>%
+      select(pirx, age.start, size, grade, nodes, pr, her2, ki67,
+           generation, horm, traz, bis, time, eventbc) %>%
+      rename(status = eventbc)
+    
+    n <- nrow(data)
+    p <- ncol(data) - 2 #remove time and status from count
+    nfold_outer <- foldout #set number of folders outer
+    nfold_inner <- foldin #set number of folders inner
+    data$subject <- seq_len(nrow(data))
+    
+    # Set up outer cross-validation
+    outer_folds <- createFolds(data$status, k = nfold_outer)  
+    
+    # Initialize placeholders for performance metrics, model coefficients, and predicted risks
+    model_coefs <- vector("list", length = length(outer_folds))
+    bsurv <- centercept <- lambda <- numeric(length(outer_folds))
+    c_indices <- slope_indices <- OEratio_indices <- numeric(length(outer_folds))
+    predicted_risks <- list()
+    
+    # Outer cross-validation loop
+    for (fold in seq_along(outer_folds)) {
+      
+      # Split data into training and testing sets
+      train_indices <- unlist(outer_folds[-fold])
+      test_indices <- unlist(outer_folds[[fold]])
+      train_data <- data[train_indices, ]
+      test_data <- data[test_indices, ]
+      
+      # Fit LASSO regularized Cox model (model selection and hyperparameter tuning)
+      X_train <- model.matrix( ~ ., dplyr::select(train_data, 1:p))[, -1] #creates dummies for categorical vars, removes "intercept" = [-1]
+      Y_train <- cbind(time = train_data$time, status = train_data$status)
+      
+      cvfit <- cv.glmnet(X_train, Y_train, family = "cox", nfolds = nfold_inner, type.measure = "deviance") #type.measure options for Cox: C or deviance (partial likelihood). C is not recommended for model comparisons: https://www.fharrell.com/post/addvalue/
+      
+      # Get optimal lambda
+      optimal_lambda <- cvfit$lambda.min
+  
+      # Fit LASSO regularized model with optimal lambda on outer train data
+      final_model <- glmnet(X_train, Y_train, family = "cox")
+          #note: ties are approximated using Breslow not Efron (default in survival::coxph) so glmnet(x, y, family="cox", lambda = 0) gives same coefs as coxph (y~x, ties="breslow")
+      lp_train <- predict(final_model, newx = X_train, type = "link", s = optimal_lambda, exact = FALSE) #type = "link" gives LP
+      lp_train_cen <- lp_train - mean(lp_train) #center at the mean lp of train data; alternatively: sum(coef(final_model)*colMeans(X_train))
+      bhaz_train_cen <- bres_basesurv(train_data$time, train_data$status, lp_train_cen, times.eval = tmax, centered = TRUE)
+      
+      # Store model specs from the final model
+      model_coefs[[fold]] <- as.matrix(coef(final_model, s = optimal_lambda))
+      centercept[fold] <- mean(lp_train)
+      bsurv[fold] <- bhaz_train_cen$base_surv
+      lambda[fold] <- optimal_lambda
+      
+      # Predict risk scores on outer TEST data
+      X_test <- model.matrix( ~ ., dplyr::select(test_data, 1:p))[, -1]
+      
+      # Calculate Predicted probabilities
+      lp_test <- predict(final_model, newx = X_test, type = "link", s = optimal_lambda, exact = FALSE)
+        #removed s = optimal_lambda, redundant as it"s already indicated in final_model
+        #type = "response" gives relative risks: exp(lp) = pred_test
+      lp_test_cen <- lp_test - mean(lp_train) #center at the mean lp of train data
+      psurv <- bhaz_train_cen$base_surv ^ exp(lp_test_cen)
+      prisk <- as.numeric(1 - psurv)
+      predicted_risks[[fold]] <- data.frame(subject = test_data$subject, predrisk = prisk, time = test_data$time, status = test_data$status)
+      
+      # Calculate Observed proportion
+      surv_fit <- survfit(Surv(test_data$time, test_data$status) ~ 1)
+      orisk <- 1 - summary(surv_fit, times = tmax)$surv
+      orisk_l <- 1 - summary(surv_fit, times = tmax)$upper
+      orisk_u <- 1 - summary(surv_fit, times = tmax)$lower
+      
+      # Calculate performance metrics (model evaluation and testing)
+      
+        # Discrimination: C index
+        coxobj <- coxph(Surv(test_data$time, test_data$status) ~ lp_test_cen)
+        c_res <- concordance(coxobj, ymax = tmax)
+        c_indices[fold] <- c_res$concordance
+      
+        # Calibration: slope and O/E ratio
+        slope_indices[fold] <- coef(coxobj)
+        OEratio_indices[fold] <- orisk / mean(prisk)
+    }
+    
+    # Model specs for ith imputed dataset
+    coefs_fold <- do.call(cbind, model_coefs) #contains p*k sets of coefs
+    i_coefs[[i]] <- rowMeans(coefs_fold) #mean from k folds
+      
+    i_bsurv[[i]] <- mean(bsurv) #mean from k folds
+    i_centercept[[i]] <- mean(centercept) #mean from k folds
+    i_lambda[[i]] <- mean(lambda) #mean from k folds
+    
+    
+    # Calculate average performance metrics for ith imputed dataset
+    i_c[[i]] <- data.frame(C = mean(c_indices),
+                           C_SE = sd(c_indices) / sqrt(length(c_indices)))
+    i_slope[[i]] <- data.frame(CalSlope = mean(slope_indices),
+                               CalSlope_SE = sd(slope_indices) / sqrt(length(slope_indices)))
+    i_OE[[i]] <- data.frame(OEratio = mean(OEratio_indices),
+                            OEratio_SE = sd(OEratio_indices) / sqrt(length(OEratio_indices)))
+  
+    # Print calibration plots (not cloglog transformed) for each fold for each imputed dataset
+      caldf <- predicted_risks
+      calibration_data <- data.frame()
+      
+      for (fold in seq_along(caldf)) {
+      
+      df <- caldf[[fold]]
+      df$x <- df$predrisk
+      
+      # Create groups of predicted and observed survival probabilities
+      q10 <- cut(df$x,
+                breaks = quantile(df$x, probs = seq(0, 1, 0.1)),
+                include.lowest = TRUE)
+      df$q10_f <- factor(q10, levels = levels(q10),
+                        labels = c("q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8", "q9", "q10"))
+      
+      obs_q10 <- survfit(Surv(time, status) ~ q10_f, data = df)
+      obs_q10_tmax <- summary(obs_q10, times = tmax, extend = TRUE)
+      y <- 1 - obs_q10_tmax$surv
+      y_lower <- 1 - obs_q10_tmax$upper
+      y_upper <- 1 - obs_q10_tmax$lower
+      
+      # Add calibration data for the current fold to the data frame
+      fold_data <- data.frame(
+        x = as.numeric(tapply(df$x, df$q10_f, mean)),
+        y = y,
+        y.lower = y_lower,
+        y.upper = y_upper,
+        fold = factor(fold)
+      )
+      
+      calibration_data <- rbind(calibration_data, fold_data)
+      }
+    
+      # Color-blind friendly color palette (from the RColorBrewer package)
+      color_palette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000", "#FFFFFF")
+      
+      # Create the calibration plot
+      calibration_plot <- ggplot(calibration_data, aes(x = x, y = y, color = fold, group = fold)) +
+        geom_line(linewidth = 1.5) +
+        geom_point(size = 2) +
+        geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray") +
+        xlim(c(0, 0.1)) +
+        ylim(c(0, 0.1)) +
+        xlab(paste("Predicted probabilities at", tmax, "years", sep = " ")) +
+        ylab(paste("Observed proportion at", tmax, "years", sep = " ")) +
+        theme_minimal() +
+        labs(title = paste("Calibration Plot - Imputation", i)) +
+        theme(legend.position = "right",
+              panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(), 
+              axis.line = element_line(color = "black"),
+              plot.title = element_text(hjust = 0.5)) +
+        scale_color_manual(name = "Fold", values = color_palette)
+      
+      print(calibration_plot)
+    }
+    
+    # Final outputs
+    mean_lambda <- mean(i_lambda) #mean from nimp datasets
+    
+    mean_bsurv <- mean(i_bsurv) #mean from nimp datasets
+    mean_cumhaz <- -log(mean_bsurv) #transform base surv back to cumhaz
+    
+    mean_center<- mean(i_centercept) #mean from nimp datasets
+    
+    coefs_combined <- do.call(cbind, i_coefs)
+    mean_coefs <- data.frame(rowMeans(coefs_combined)) #mean from nimp datasets
+    
+    predrisks_combined <- do.call(rbind, caldf)
+    mean_predrisks <- aggregate(. ~ subject, data = predrisks_combined, FUN = mean)
+  
+    # Combine performance from i imputed datasets
+    imp_c <- do.call(rbind, i_c)
+    imp_slope <- do.call(rbind, i_slope)
+    imp_OE <- do.call(rbind, i_OE)
+    
+    metrics_C <- pool_estimates(imp_c[,1], imp_c[,2], logit_trans = TRUE)
+    metrics_slope <- pool_estimates(imp_slope[,1], imp_slope[,2]) #no trans
+    metrics_OE <- pool_estimates(imp_OE[,1], imp_OE[,2], log_trans = TRUE)
+    
+    perfstat <- list(pooled_c = metrics_C, pooled_slope = metrics_slope, pooled_OEratio = metrics_OE)
+    
+    return(list(lambda = mean_lambda, basecumhaz = mean_cumhaz, centercept = mean_center, coefs = mean_coefs,
+                predrisks = mean_predrisks, perfstat = perfstat))
+  }
+
+LASSOres_test <- LASSOCox_test_perf(dat, 20, 10, 10)
+
+# Shrinkage parameter
+round(LASSOres_test$lambda, 4)
+
+# Baseline cumhaz
+round(LASSOres_test$basecumhaz, 6)
+
+# Coefficients
+round(LASSOres_test$coefs, 2)
+
+# Centercept
+round(LASSOres_test$centercept, 6)
+
+# Predicted probabilities
+form4test_riskdf <- LASSOres_test$predrisks %>% rename(event = status, predicted_risk = predrisk)
+
+# Pool performance measures results
+form4test_res <- LASSOres_test$perfstat
+form4test_res
+
+# Net benefit
+form4test_nb_TP <- nb_fn_TP(data = form4test_riskdf, tmax = tmax, thresholdmax = 0.2)
+form4test_nb_TN <- nb_fn_TN(data = form4test_riskdf, tmax = tmax, thresholdmax = 0.2)
+head(form4test_nb_TP)
+head(form4test_nb_TN)
+```
+
+## Test dataset - with genomic risk
+```{r Rev_LASSO_test_w_grisk}
+# Function to run nested Cox LASSO on imputed datasets
+LASSOCoxg_test_perf <- function(dataframe, nimp, foldin, foldout){
+  
+  set.seed(202309)
+  i_coefs <- i_c <- i_slope <- i_OE <- list()
+  i_lambda <- i_bsurv <- i_centercept <- numeric(nimp)
+  
+  for (i in 1:nimp) {
+    
+    # Get ith imputed dataset
+    data <- dataframe %>%
+      filter(.imp == i) %>%
+      select(grisk, pirx, age.start, size, grade, nodes, pr, her2, ki67,
+             generation, horm, traz, bis, time, eventbc) %>%
+      rename(status = eventbc)
+    
+    n <- nrow(data)
+    p <- ncol(data) - 2 #remove time and status from count
+    nfold_outer <- foldout #set number of folders outer
+    nfold_inner <- foldin #set number of folders inner
+    data$subject <- seq_len(nrow(data))
+    
+    # Set up outer cross-validation
+    outer_folds <- createFolds(data$status, k = nfold_outer)  
+    
+    # Initialize placeholders for performance metrics, model coefficients, and predicted risks
+    model_coefs <- vector("list", length = length(outer_folds))
+    bsurv <- centercept <- lambda <- numeric(length(outer_folds))
+    c_indices <- slope_indices <- OEratio_indices <- numeric(length(outer_folds))
+    predicted_risks <- list()
+    
+    # Outer cross-validation loop
+    for (fold in seq_along(outer_folds)) {
+      
+      # Split data into training and testing sets
+      train_indices <- unlist(outer_folds[-fold])
+      test_indices <- unlist(outer_folds[[fold]])
+      train_data <- data[train_indices, ]
+      test_data <- data[test_indices, ]
+      
+      # Fit LASSO regularized Cox model (model selection and hyperparameter tuning)
+      X_train <- model.matrix( ~ ., dplyr::select(train_data, 1:p))[, -1] #creates dummies for categorical vars, removes "intercept" = [-1]
+      Y_train <- cbind(time = train_data$time, status = train_data$status)
+      
+      cvfit <- cv.glmnet(X_train, Y_train, family = "cox", nfolds = nfold_inner, type.measure = "deviance") #type.measure options for Cox: C or deviance (partial likelihood). C is not recommended for model comparisons: https://www.fharrell.com/post/addvalue/
+      
+      # Get optimal lambda
+      optimal_lambda <- cvfit$lambda.min
+      
+      # Fit LASSO regularized model with optimal lambda on outer train data
+      final_model <- glmnet(X_train, Y_train, family = "cox")
+      #note: ties are approximated using Breslow not Efron (default in survival::coxph) so glmnet(x, y, family="cox", lambda = 0) gives same coefs as coxph (y~x, ties="breslow")
+      lp_train <- predict(final_model, newx = X_train, type = "link", s = optimal_lambda, exact = FALSE) #type = "link" gives LP
+      lp_train_cen <- lp_train - mean(lp_train) #center at the mean lp of train data; alternatively: sum(coef(final_model)*colMeans(X_train))
+      bhaz_train_cen <- bres_basesurv(train_data$time, train_data$status, lp_train_cen, times.eval = tmax, centered = TRUE)
+      
+      # Store model specs from the final model
+      model_coefs[[fold]] <- as.matrix(coef(final_model, s = optimal_lambda))
+      centercept[fold] <- mean(lp_train)
+      bsurv[fold] <- bhaz_train_cen$base_surv
+      lambda[fold] <- optimal_lambda
+      
+      # Predict risk scores on outer TEST data
+      X_test <- model.matrix( ~ ., dplyr::select(test_data, 1:p))[, -1]
+      
+      # Calculate Predicted probabilities
+      lp_test <- predict(final_model, newx = X_test, type = "link", s = optimal_lambda, exact = FALSE)
+      #removed s = optimal_lambda, redundant as it"s already indicated in final_model
+      #type = "response" gives relative risks: exp(lp) = pred_test
+      lp_test_cen <- lp_test - mean(lp_train) #center at the mean lp of train data
+      psurv <- bhaz_train_cen$base_surv ^ exp(lp_test_cen)
+      prisk <- as.numeric(1 - psurv)
+      predicted_risks[[fold]] <- data.frame(subject = test_data$subject, predrisk = prisk, time = test_data$time, status = test_data$status)
+      
+      # Calculate Observed proportion
+      surv_fit <- survfit(Surv(test_data$time, test_data$status) ~ 1)
+      orisk <- 1 - summary(surv_fit, times = tmax)$surv
+      orisk_l <- 1 - summary(surv_fit, times = tmax)$upper
+      orisk_u <- 1 - summary(surv_fit, times = tmax)$lower
+      
+      # Calculate performance metrics (model evaluation and testing)
+      
+      # Discrimination: C index
+      coxobj <- coxph(Surv(test_data$time, test_data$status) ~ lp_test_cen)
+      c_res <- concordance(coxobj, ymax = tmax)
+      c_indices[fold] <- c_res$concordance
+      
+      # Calibration: slope and O/E ratio
+      slope_indices[fold] <- coef(coxobj)
+      OEratio_indices[fold] <- orisk / mean(prisk)
+    }
+    
+    # Model specs for ith imputed dataset
+    coefs_fold <- do.call(cbind, model_coefs) #contains p*k sets of coefs
+    i_coefs[[i]] <- rowMeans(coefs_fold) #mean from k folds
+    
+    i_bsurv[[i]] <- mean(bsurv) #mean from k folds
+    i_centercept[[i]] <- mean(centercept) #mean from k folds
+    i_lambda[[i]] <- mean(lambda) #mean from k folds
+    
+    
+    # Calculate average performance metrics for ith imputed dataset
+    i_c[[i]] <- data.frame(C = mean(c_indices),
+                           C_SE = sd(c_indices) / sqrt(length(c_indices)))
+    i_slope[[i]] <- data.frame(CalSlope = mean(slope_indices),
+                               CalSlope_SE = sd(slope_indices) / sqrt(length(slope_indices)))
+    i_OE[[i]] <- data.frame(OEratio = mean(OEratio_indices),
+                            OEratio_SE = sd(OEratio_indices) / sqrt(length(OEratio_indices)))
+    
+    # Print calibration plots (not cloglog transformed) for each fold for each imputed dataset
+    caldf <- predicted_risks
+    calibration_data <- data.frame()
+    
+    for (fold in seq_along(caldf)) {
+      
+      df <- caldf[[fold]]
+      df$x <- df$predrisk
+      
+      # Create groups of predicted and observed survival probabilities
+      q10 <- cut(df$x,
+                breaks = quantile(df$x, probs = seq(0, 1, 0.1)),
+                include.lowest = TRUE)
+      df$q10_f <- factor(q10, levels = levels(q10),
+                        labels = c("q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8", "q9", "q10"))
+      
+      obs_q10 <- survfit(Surv(time, status) ~ q10_f, data = df)
+      obs_q10_tmax <- summary(obs_q10, times = tmax, extend = TRUE)
+      y <- 1 - obs_q10_tmax$surv
+      y_lower <- 1 - obs_q10_tmax$upper
+      y_upper <- 1 - obs_q10_tmax$lower
+      
+      # Add calibration data for the current fold to the data frame
+      fold_data <- data.frame(
+        x = as.numeric(tapply(df$x, df$q10_f, mean)),
+        y = y,
+        y.lower = y_lower,
+        y.upper = y_upper,
+        fold = factor(fold)
+      )
+      
+      calibration_data <- rbind(calibration_data, fold_data)
+    }
+    
+    # Color-blind friendly color palette (from the RColorBrewer package)
+    color_palette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000", "#FFFFFF")
+    
+    # Create the calibration plot
+    calibration_plot <- ggplot(calibration_data, aes(x = x, y = y, color = fold, group = fold)) +
+      geom_line(linewidth = 1.5) +
+      geom_point(size = 2) +
+      geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray") +
+      xlim(c(0, 0.1)) +
+      ylim(c(0, 0.1)) +
+      xlab(paste("Predicted probabilities at", tmax, "years", sep = " ")) +
+      ylab(paste("Observed proportion at", tmax, "years", sep = " ")) +
+      theme_minimal() +
+      labs(title = paste("Calibration Plot - Imputation", i)) +
+      theme(legend.position = "right",
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(), 
+            axis.line = element_line(color = "black"),
+            plot.title = element_text(hjust = 0.5)) +
+      scale_color_manual(name = "Fold", values = color_palette)
+    
+    print(calibration_plot)
+  }
+  
+  # Final outputs
+  mean_lambda <- mean(i_lambda) #mean from nimp datasets
+  
+  mean_bsurv <- mean(i_bsurv) #mean from nimp datasets
+  mean_cumhaz <- -log(mean_bsurv) #transform base surv back to cumhaz
+  
+  mean_center<- mean(i_centercept) #mean from nimp datasets
+  
+  coefs_combined <- do.call(cbind, i_coefs)
+  mean_coefs <- data.frame(rowMeans(coefs_combined)) #mean from nimp datasets
+  
+  predrisks_combined <- do.call(rbind, caldf)
+  mean_predrisks <- aggregate(. ~ subject, data = predrisks_combined, FUN = mean)
+  
+  # Combine performance from i imputed datasets
+  imp_c <- do.call(rbind, i_c)
+  imp_slope <- do.call(rbind, i_slope)
+  imp_OE <- do.call(rbind, i_OE)
+  
+  metrics_C <- pool_estimates(imp_c[,1], imp_c[,2], logit_trans = TRUE)
+  metrics_slope <- pool_estimates(imp_slope[,1], imp_slope[,2]) #no trans
+  metrics_OE <- pool_estimates(imp_OE[,1], imp_OE[,2], log_trans = TRUE)
+  
+  perfstat <- list(pooled_c = metrics_C, pooled_slope = metrics_slope, pooled_OEratio = metrics_OE)
+  
+  return(list(lambda = mean_lambda, basecumhaz = mean_cumhaz, centercept = mean_center, coefs = mean_coefs,
+              predrisks = mean_predrisks, perfstat = perfstat))
+}
+
+LASSOresg_test <- LASSOCoxg_test_perf(dat, 20, 10, 10)
+
+# Shrinkage parameter
+round(LASSOresg_test$lambda, 4)
+
+# Baseline cumhaz
+round(LASSOresg_test$basecumhaz, 6)
+
+# Coefficients
+round(LASSOresg_test$coefs, 2)
+
+# Centercept
+round(LASSOresg_test$centercept, 6)
+
+# Predicted probabilities
+form4gtest_riskdf <- LASSOresg_test$predrisks %>% rename(event = status, predicted_risk = predrisk)
+
+# Pool performance measures results
+form4gtest_res <- LASSOresg_test$perfstat
+form4gtest_res
+
+# Net benefit
+form4gtest_nb_TP <- nb_fn_TP(data = form4gtest_riskdf, tmax = tmax, thresholdmax = 0.2)
+form4gtest_nb_TN <- nb_fn_TN(data = form4gtest_riskdf, tmax = tmax, thresholdmax = 0.2)
+head(form4gtest_nb_TP)
+head(form4gtest_nb_TN)
+```
+
+```{r Save}
+#save.image("WS_4_PREDICT_extension.RData")
+```

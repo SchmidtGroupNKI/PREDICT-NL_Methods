@@ -1,0 +1,179 @@
+---
+title: "Descriptive analysis on the MINDACT dataset"
+author: "Mary Ann Binuya"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+  pdf_document: default
+---
+
+# Aim
+1. To produce Table 1 for the MINDACT dataset
+
+```{r setup, include=FALSE}
+#Set libpath
+#.libPaths(c("U:/libraries", .libPaths()))
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = TRUE,
+  warning = FALSE,
+  fig.retina = 3,
+  fig.path = "Output/2 Descriptive/")
+
+#Load libraries
+library(dplyr) #for data manipulations
+library(table1) #for table1's
+library(survival) #for survival analysis
+
+rm(list=ls())
+```
+
+# Load data
+```{r Load}
+load("WS_1_Data_Prep_MINDACT.RData")
+
+dat <- datapredimp_bc %>%
+  filter(.imp!=0) %>%
+  select(.imp,
+         time,
+         os,
+         oscr,
+         pirx,
+         mi,
+         age.start,
+         size,
+         grade,
+         nodes,
+         er,
+         pr,
+         her2,
+         ki67,
+         generation,
+         horm,
+         traz,
+         bis,
+         grisk,
+         bcss_5_years,
+         oths_5_years,
+         eventbc,
+         eventoth) %>%
+  mutate(sizecat = case_when( #follow categories as reported in Candido et al, 2017 paper
+      size < 10 ~ 1,
+      size < 20 ~ 2,
+      size < 30 ~ 3,
+      size < 50 ~ 4,
+      TRUE ~ 5),
+    agecat = case_when( #follow categories as reported in Candido et al, 2017 paper
+      age.start < 30 ~ 1,
+      age.start < 40 ~ 2,
+      age.start < 50 ~ 3,
+      age.start < 60 ~ 4,
+      age.start < 70 ~ 5,
+      TRUE ~ 6))
+
+rm(list=setdiff(ls(), c("dat")))
+  
+tmax <- 5
+brisk_bc <- exp(0.7424402 - 7.527762/sqrt(tmax) - 1.812513*log(tmax)/sqrt(tmax)) #ER+ BC baseline cumhaz
+bsurv_bc <- exp(-brisk_bc) #S0 = exp(-cumhaz)
+dat$bcss <- bsurv_bc^exp(dat$pirx)
+
+  head(dat$bcss)
+  head(dat$bcss_5_years) #rounded off to 4th decimal place
+  all.equal(dat$bcss, dat$bcss_5_years) #sanity check that PREDICT v2.3 function, which gives cumulative breast cancer survival (BCSS) estimates based on s.cum.br.rx, and the estimates computed manually above by multiplying the event-specific prognostic index and baseline cumulative survival at t years, are identical. Note difference only in 5th decimal place.
+
+brisk_oth <- exp(-6.052919 + (1.079863*log(tmax)) + (.3255321*tmax^.5)) #other baseline cumhaz
+bsurv_oth <- exp(-brisk_oth) #S0 = exp(-cumhaz)
+dat$oths <- bsurv_oth^exp(dat$mi)
+
+  head(dat$oths)
+  head(dat$oths_5_years)
+  all.equal(dat$oths, dat$oths_5_years) #sanity check that PREDICT v2.3 function, which gives cumulative other survival (OthSS) estimates based on s.cum.oth.rx, and the estimates computed manually above by multiplying the event-specific prognostic index and baseline cumulative survival at t years, are identical. Note difference only in 5th decimal place.
+```
+
+# Format data
+```{r Format}
+# Format variables to add levels
+  dat$agecat <- as.factor(dat$agecat)
+  dat$sizecat <- as.factor(dat$sizecat)
+  dat$nodes <- as.factor(dat$nodes)
+  dat$grade <- as.factor(dat$grade)
+  dat$oscr <- as.factor(dat$oscr)
+
+# Add levels
+  levels(dat$agecat) <- c("20-29 years", "30-39 years", "40-49 years", "50-59 years", "60-69 years", "70-79 years")
+  levels(dat$sizecat) <- c("< 10 mm", "10-19 mm", "20-29 mm", "30-49 mm", ">= 50 mm")
+  levels(dat$grade) <- c("Well differentiated", "Moderately differentiated","Poorly- or undifferentiated")
+  levels(dat$nodes) <- c("Node-negative", "1 positive lymph node", "2 positive lymph nodes", "3 positive lymph nodes", "4+ positive lymph nodes")
+  levels(dat$pr) <- c("Negative","Positive")
+  levels(dat$her2) <- c("Negative","Positive")
+  levels(dat$ki67) <- c("Negative", "Positive")
+  levels(dat$generation) <- c("No","Second generation","Third generation")
+  levels(dat$horm) <- c("No","Yes")
+  levels(dat$traz) <- c("No","Yes")
+  levels(dat$bis) <- c("No","Yes")
+  levels(dat$grisk) <- c("Low","High")
+  levels(dat$oscr) <- c("Alive", "Breast cancer death","Other or unknown death")
+  
+# Derive predicted mortality
+  dat$bcmort <- (1-dat$bcss)*100 #breast cancer death
+  dat$othmort <- (1-dat$oths)*100 #other death
+```
+
+# Table 1
+```{r Table1_5yrs}
+# Distribution of baseline characteristics and predicted mortality at 5 years
+labels_cr <- list(
+  variables=list(agecat="Age at diagnosis (years) - categorized",
+                 age.start="Age at diagnosis (years)",
+                 sizecat="Tumor size (mm) - categorized",
+                 size="Tumor size (mm)",
+                 grade="Tumor grade",
+                 nodes="Number of positive nodes",
+                 pr="Progesterone status",
+                 her2="HER2 status",
+                 ki67="Ki67 status",
+                 generation="Chemotherapy generation",
+                 horm="Hormone therapy",
+                 traz="Trastuzumab therapy",
+                 bis="Bisphosphonates",
+                 grisk="Genomic risk (MammaPrint)",
+                 time="Follow-up time (years)",
+                 oscr="Events",
+                 bcmort="PREDICT Predicted 5-year breast cancer mortality",
+                 othmort="PREDICT Predicted 5-year other mortality"),
+  groups=list(""))
+
+strata_cr <- c(list(Total=dat))
+
+table1(strata_cr, labels_cr, groupspan=c(1),
+       render.continuous=c(.="Mean (SD)", .="Median [Min, Max]"),
+       data=dat, topclass="Rtable1-zebra")
+
+# In the paper, mean counts from the 20 multiply imputed datasets can be reported for the categorical variables.
+```
+
+# Additional info
+```{r obsmort5years}
+# Observed mortality at 5 years
+  dat$wt <- 1/max(dat$.imp)
+
+  obs <- survfit(Surv(time,os)~1, weight=wt, data=dat)
+  summary(obs, times=5, extend=TRUE)$n.event #145 total events at 5 years
+  round(summary(obs, times=5, extend=TRUE)$n.event*100/5920, 1) #note: ref total # obs
+
+  obs_bc <- survfit(Surv(time,eventbc)~1, weight=wt, data=dat)
+  summary(obs_bc, times=5, extend=TRUE) #59 breast cancer deaths at 5 years
+  round(summary(obs_bc, times=5, extend=TRUE)$n.event*100/5920, 2) #note: ref total # obs
+
+  obs_oth <- survfit(Surv(time,eventoth)~1, weight=wt, data=dat)
+  summary(obs_oth, times=5, extend=TRUE) #86 other/unknown deaths at 5 years
+  round(summary(obs_oth, times=5, extend=TRUE)$n.event*100/5920, 2) #note: ref total # obs
+  
+  round(100-(summary(obs_bc, times=5, extend=TRUE)$n.event*100/5920+
+        summary(obs_oth, times=5, extend=TRUE)$n.event*100/5920), 2) #note: ref total # obs
+```
+
