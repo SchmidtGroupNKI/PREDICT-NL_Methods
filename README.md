@@ -12,6 +12,7 @@ Continuous monitoring and improvement of clinical prediction models are essentia
 | 4_PREDICT_updating_continued.Rmd     | PREDICT extension and validation of the extended models (calibration plots, decision curves, and net benefit).
 | 5_Method_selection.Rmd               | Application of the closed test procedure on the full MINDACT dataset.
 | 5_Method_selection_simulation.Rmd    | Simulation of the closed test procedure on samples of the MINDACT dataset.
+| pool_perf.R                          | Pooling functions, and other functions used in the syntax.
 
 # Contact
 Mary Ann E. Binuya <br/>
