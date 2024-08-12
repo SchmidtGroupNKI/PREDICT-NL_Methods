@@ -2,7 +2,6 @@
 #Author: Mary Ann Binuya
 #Last updated: December 21, 2023
 
-
 #References:
   #Pooling: https://bookdown.org/mwheymans/bookmi/rubins-rules.html; https://bookdown.org/mwheymans/bookmi/pooling-methods-for-categorical-variables.html
   #Transformations for pooling:
@@ -245,8 +244,7 @@
   #data <- data derived from pool_cal function
   #times <- calibration at t years
   #main <- plot title
-  #Brier <- Brier score
-  #C <- C-index/AUC
+  #C <- C-index
   #calslope <- calibration slope
   #OEratio <- OE ratio
   #size_legend <- size of texts
@@ -347,7 +345,7 @@
     text(x=0, y=(limit-0.04), labels=paste("...O/E ratio: ", OEratio, sep=""), cex=size_legend, pos=4)
   }
   
-#6. Calculate net benefit (NB):
+#6. Calculate Net Benefit (NB):
   #In survival settings, we can manually calculate NB over a range of thresholds using this formula (Vickers et al, 2008):
   #NB = TP/n -  w x FP/n, where:
   #w= pt/(1-pt), where that pt = threshold probability
@@ -445,7 +443,7 @@
     return(NB_res)
   }
   
-#7. Calculate pooled Likelihood Ratio (LR) estimates using RR for combining X2 (also called D2 procedure) - work in progress; cox PLL~X2 asymptotically
+#7. Calculate pooled Likelihood Ratio (LR) estimates
   
   pool_lrt <- function(data, impvar, nimp, formula, nullformula) {
     perf_stats <- df <- matrix(NA, nimp, 1)
@@ -460,13 +458,6 @@
       #Calculate likelihood ratio (LR)
       perf_stats[i,] <- anova(f, f.null)$Chisq[2]
       df[i,] <- anova(f, f.null)$Df[2]
-      
-      #Alternatively, calculate LR manually then specify df manually in pooling
-      #ll.null <- f.null$loglik
-      #ll.full <- f$loglik[2] #partial likelihood
-      #ll.diff <- 2*(ll.full - ll.null) # ~ X2 distribution asymptotically assuming large N
-      #perf_stats[i,] <- ll.diff
-      
       }
     
     #Pool Chi-square statistics per D2 procedure
